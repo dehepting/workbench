@@ -36,9 +36,21 @@ export function buildPrompt(task, deps = '') {
       ? `\n## Depends on (already completed)\n${deps}`
       : `\nDepends on (already completed): ${task.deps.join(', ')}`);
   }
-  parts.push('\n\nAcceptance: the work described above is complete. Your final message must contain '
+  parts.push(
+    '\n\nAcceptance: the work described above is complete. Your final message must contain '
     + 'the deliverable itself — do not describe a file or document you did not actually write. '
-    + 'Report exactly what you did.');
+    + 'Report exactly what you did.',
+    // A pooled model asked for a comparison table will fill gaps rather than
+    // admit them: it produced a doc recommending GROQ_MODEL=groq-2-turbo, a
+    // model that has never existed, and invented an entire "pre-2025 free
+    // tier" column the research never covered. Every specific is verifiable,
+    // so pin the model to its evidence instead of hoping it self-edits.
+    '\nGround rules: draw only on the evidence above. Where a needed fact is missing, '
+    + 'write "not recorded" rather than estimating — a stated gap is useful, a guessed '
+    + 'number is worse than none. Keep every source citation from the research verbatim; '
+    + 'never invent model names, prices, limits, or dates, and never present a comparison '
+    + 'for a column you have no evidence about.',
+  );
   return parts.join('\n');
 }
 

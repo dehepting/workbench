@@ -89,6 +89,32 @@ test('acceptance demands the deliverable itself, not a description of one', () =
   assert.match(prompt, /Report exactly what you did/);
 });
 
+test('the prompt pins the model to its evidence instead of inviting invention', () => {
+  // A pooled model asked for a comparison table invented GROQ_MODEL=groq-2-turbo
+  // (no such model) and a "pre-2025 free tier" column the research never covered.
+  // Both are checkable, so the acceptance block has to forbid them out loud.
+  const prompt = buildPrompt({ title: 'Compare providers', deps: ['t_abc123'] });
+  assert.match(prompt, /draw only on the evidence above/i);
+  assert.match(prompt, /write "not recorded" rather than estimating/i);
+  assert.match(prompt, /Keep every source citation/i);
+  assert.match(prompt, /never invent model names, prices, limits, or dates/i);
+  assert.match(prompt, /no evidence about/i);
+});
+
+test('the grounding rules arrive with the dependency context they govern', () => {
+  // Grounding is meaningless without something to be grounded in: with no deps
+  // the prompt must not pretend there is evidence, and with deps it must come
+  // after them so the ordering reads evidence-then-constraints.
+  const withoutDeps = buildPrompt({ title: 'Anything' });
+  const withDeps = buildPrompt({ title: 'Anything', deps: ['t_abc123'] }, '### Research\nGroq: 30 RPM');
+  assert.ok(withDeps.includes('### Research'), 'dependency context is present');
+  assert.ok(
+    withDeps.indexOf('### Research') < withDeps.indexOf('Ground rules'),
+    'evidence precedes the rules that constrain it'
+  );
+  assert.match(withoutDeps, /Ground rules/, 'the rules apply to every prompt, deps or not');
+});
+
 test('buildPrompt assembles a task into an agent prompt', () => {
   const prompt = buildPrompt({
     title: 'Ship the thing',
