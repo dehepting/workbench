@@ -33,9 +33,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func restartServer() {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // Prefer launchd (it only restarts the HTTP server). The pkill fallback is
+        // anchored to the bare server command so it can't take out `--mcp` workers.
         task.arguments = ["-lc",
-            "pkill -f 'workbench/bin/workbench.js'; sleep 0.5; " +
-            "nohup node /Users/davidhepting/workbench/bin/workbench.js >/dev/null 2>&1 &"]
+            "if launchctl kickstart -k gui/$(id -u)/com.workbench.server 2>/dev/null; then :; else " +
+            "pkill -f 'workbench/bin/workbench\\.js$'; sleep 0.5; " +
+            "nohup node /Users/davidhepting/workbench/bin/workbench.js >/dev/null 2>&1 & fi"]
         try? task.run()
     }
 
