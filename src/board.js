@@ -26,7 +26,7 @@ function hydrate(t) {
   };
 }
 
-function getTask(db, id) {
+export function getTask(db, id) {
   const t = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
   if (!t) fail('not_found', `Task ${id} not found`);
   return hydrate(t);

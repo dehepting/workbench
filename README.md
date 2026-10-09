@@ -63,6 +63,25 @@ The worker: `wb_next_task` → comment "picked up" → move to `doing` → execu
 comment output → move to `review` (if `requires_review`) or `done` → on failure,
 move to `failed` (auto-retry applies). Leases auto-renew every 60s while working.
 
+## GitHub sync
+
+Tasks and GitHub issues stay in lockstep. Auth uses your existing
+`gh` login if present, otherwise a token stored in the macOS
+Keychain (the dashboard prompts on first use — tokens never touch
+the DB, `.env`, or logs).
+
+- **Task → issue**: `POST /api/tasks/:id/github {repo}` creates the
+  issue, links it on the task card, and comments back on the issue
+- **Issue → task**: configure a webhook (GitHub → repo settings →
+  webhooks → `http://your-host:4173/api/github/webhook`, secret in
+  `GITHUB_WEBHOOK_SECRET`); issues opened become board tasks,
+  issues closed complete them
+- MCP: `wb_github_status`, `wb_github_link_task`
+
+Inbound webhooks from GitHub need a reachable host (a tunnel like
+`cloudflared tunnel --url http://localhost:4173` works for local
+development).
+
 ## MCP setup
 
 Workbench speaks the Model Context Protocol over stdio. The V2 config format
