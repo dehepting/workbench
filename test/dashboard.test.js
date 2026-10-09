@@ -32,24 +32,44 @@ test('every handler target exists in the markup', () => {
   // The wiring at the bottom of the script grabs these by id at load time;
   // a renamed element would throw before boot() ever runs.
   for (const id of ['projectSelect', 'newProjectBtn', 'newTaskBtn', 'providersBtn',
-                    'githubBtn', 'chips', 'board', 'taskOverlay', 'formOverlay', 'providersOverlay']) {
+                    'githubBtn', 'githubOverlay', 'githubModal',
+                    'chips', 'board', 'taskOverlay', 'formOverlay', 'providersOverlay']) {
     assert.ok(html.includes(`id="${id}"`), `missing #${id} in index.html`);
   }
 });
 
-test('the GitHub binding control and its chip are wired', () => {
+test('the GitHub panel is a picker, not a prompt', () => {
   const src = inlineScript(html);
-  assert.ok(src.includes("$('#githubBtn').onclick"), 'githubBtn needs a click handler');
-  assert.ok(src.includes('/github`'), 'the handler must call the binding endpoint');
-  assert.ok(src.includes('no repo'), 'an unbound project must say so rather than look bound');
-  // The repo is echoed into the chip — escape it, a repo name is user input.
-  assert.ok(src.includes('esc(repo)'), 'the repo name must be escaped before display');
+  assert.ok(src.includes("$('#githubBtn').onclick = openGithub"), 'githubBtn opens the panel');
+  assert.ok(src.includes('/api/github/repos'), 'the panel lists repos from the API');
+  assert.ok(src.includes('data-repo='), 'repos are clickable rows');
+  assert.ok(src.includes('this checkout'), 'the detected repo is flagged');
+  assert.ok(src.includes('repoRow'), 'rows carry the repoRow class for styling');
+  // A free-text prompt would defeat the point — the whole reason for the panel
+  // is that owner/repo is easy to mistype and impossible to guess.
+  assert.ok(!/githubBtn[\s\S]{0,400}prompt\(/.test(src), 'the GitHub flow must not ask for a repo by hand');
 });
 
-test('the binding endpoint is reachable from the dashboard', () => {
+test('the panel reports connection state and the current binding', () => {
   const src = inlineScript(html);
-  assert.ok(/\/api\/projects\/\$\{state\.project\}\/github/.test(src),
-    'the handler should post to /api/projects/<id>/github');
+  assert.ok(src.includes('Connected') && src.includes('Not connected'), 'both connection states render');
+  assert.ok(src.includes('gh auth login'), 'an unconnected user is told how to connect');
+  assert.ok(src.includes('mirrors'), 'the current binding is shown');
+  assert.ok(src.includes('unbind'), 'there is a way to unbind');
+});
+
+test('the panel can trigger a sync and the binding endpoint is wired', () => {
+  const src = inlineScript(html);
+  assert.ok(src.includes('/api/projects/sync'), 'a sync button posts to the sync endpoint');
+  assert.ok(/\/api\/projects\/\$\{project\.id\}\/github/.test(src), 'clicking a repo posts to the binding endpoint');
+  assert.ok(src.includes('renderChips'), 'binding refreshes the header chip');
+});
+
+test('the repo name is escaped before display', () => {
+  const src = inlineScript(html);
+  // Repo names are echoed into the panel and the chip — escape them both.
+  assert.equal((src.match(/esc\(r\.repo\)/g) || []).length >= 2, true, 'rows escape the repo name');
+  assert.ok(src.includes('esc(repo)'), 'the chip escapes the repo name');
 });
 
 test('favicon is declared (avoids a 404 on /favicon.ico)', () => {

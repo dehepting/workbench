@@ -2,6 +2,7 @@ import readline from 'node:readline';
 import * as board from './board.js';
 import * as model from './model.js';
 import * as github from './github.js';
+import * as sync from './sync.js';
 import { providerHealth } from './providers.js';
 
 const TOOLS = [
@@ -23,6 +24,9 @@ const TOOLS = [
   { name: 'wb_providers', description: 'Health of the pooled inference providers (configured, tier, latency, failures) — keys are never exposed', inputSchema: { type: 'object', properties: {} } },
   { name: 'wb_complete', description: 'Run a prompt through the pooled free-tier providers and log it to the cost ledger. Model aliases: free:smart, free:fast, free:cheap, free:a, free:s — or an explicit provider/model like groq/llama-3.3-70b-versatile', inputSchema: { type: 'object', properties: { prompt: { type: 'string' }, model: { type: 'string' }, agent: { type: 'string' }, task_id: { type: 'string' }, max_tokens: { type: 'integer' } }, required: ['prompt'] } },
   { name: 'wb_github_status', description: 'GitHub connection status (via gh CLI auth or macOS Keychain token)', inputSchema: { type: 'object', properties: {} } },
+  { name: 'wb_github_repos', description: 'Repos this token can see, plus the one the working directory points at — pick from these instead of typing owner/repo', inputSchema: { type: 'object', properties: {} } },
+  { name: 'wb_github_sync', description: 'Two-way sync: pull open issues into a bound project as backlog tasks, complete/requeue tasks from issue state, push task comments back as issue comments', inputSchema: { type: 'object', properties: { project_id: { type: 'string' } }, required: [] } },
+  { name: 'wb_project_bind_repo', description: 'Bind a project to a GitHub repo (owner/repo). Issues on that repo become tasks; done tasks close them. Pass repo: null to unbind', inputSchema: { type: 'object', properties: { project_id: { type: 'string' }, repo: { type: ['string', 'null'] } }, required: ['project_id'] } },
   { name: 'wb_github_link_task', description: 'Create a GitHub issue for a task and link it bidirectionally (task card shows the issue, issue gets a link back)', inputSchema: { type: 'object', properties: { task_id: { type: 'string' }, repo: { type: 'string', description: 'owner/repo, e.g. dehepting/workbench' }, labels: { type: 'array', items: { type: 'string' } } }, required: ['task_id', 'repo'] } },
   { name: 'wb_stats', description: 'Flow metrics: throughput/day, WIP, median cycle time, slowest tasks, created-vs-finished per day', inputSchema: { type: 'object', properties: {} } },
   { name: 'wb_record_run', description: 'Record an agent run to the cost ledger (agent, model, tokens in/out; cost auto-estimated if omitted)', inputSchema: { type: 'object', properties: { agent: { type: 'string' }, model: { type: 'string' }, tokens_in: { type: 'integer' }, tokens_out: { type: 'integer' }, cost: { type: 'number' }, task_id: { type: 'string' } }, required: ['agent'] } },
@@ -49,6 +53,23 @@ async function dispatch(name, args, db) {
     case 'wb_add_comment': return board.addTaskComment(db, args.task_id, args.author, args.body);
     case 'wb_providers': return { providers: providerHealth() };
     case 'wb_github_status': return github.githubStatus();
+    case 'wb_github_repos': {
+      const token = await github.getToken();
+      if (!token) return { connected: false, repos: [] };
+      const [repos, detected] = await Promise.all([
+        github.listRepos(token).catch(() => []),
+        github.detectRepo(),
+      ]);
+      return { connected: true, detected, repos };
+    }
+    case 'wb_github_sync': {
+      if (!args.project_id) return sync.syncAll(db);
+      return sync.syncProject(db, args.project_id);
+    }
+    case 'wb_project_bind_repo': {
+      const project = board.bindProjectRepo(db, args.project_id, args.repo ?? null);
+      return { project_id: project.id, name: project.name, repo: project.repo };
+    }
     case 'wb_github_link_task': {
       const token = await github.getToken();
       if (!token) throw new Error('GitHub not connected — run `gh auth login` or POST a token to /api/github/setup');

@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const execFileP = promisify(execFile);
 
@@ -96,6 +98,87 @@ export async function closeIssue(token, repo, number) {
   });
   if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return res.json();
+}
+
+export async function reopenIssue(token, repo, number) {
+  const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
+    method: 'PATCH',
+    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state: 'open' }),
+  });
+  if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+async function paged(token, url) {
+  // Pull every page rather than silently returning the first 30 — an import
+  // that drops issues past page one is worse than one that says "too many".
+  const out = [];
+  for (let page = 1; page <= 10; page++) {
+    const sep = url.includes('?') ? '&' : '?';
+    const res = await fetch(`${url}${sep}per_page=100&page=${page}`, { headers: authHeaders(token) });
+    if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const batch = await res.json();
+    out.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return out;
+}
+
+// The repos this token can see, most recently pushed first. Feeds the picker so
+// nobody has to type an owner/repo by hand.
+export async function listRepos(token) {
+  const repos = await paged(token, 'https://api.github.com/user/repos?sort=pushed&affiliation=owner,collaborator,organization_member');
+  return repos.map((r) => ({
+    repo: r.full_name,
+    private: !!r.private,
+    pushed_at: r.pushed_at,
+    default_branch: r.default_branch,
+    open_issues: r.open_issues_count ?? 0,
+  }));
+}
+
+// Open issues (pull requests excluded — a PR is not a task).
+export async function listIssues(token, repo, { state = 'open' } = {}) {
+  const issues = await paged(token, `https://api.github.com/repos/${repo}/issues?state=${state}`);
+  return issues.filter((i) => !i.pull_request).map((i) => ({
+    number: i.number,
+    title: i.title,
+    body: i.body || '',
+    url: i.html_url,
+    state: i.state,
+    labels: (i.labels || []).map((l) => (typeof l === 'string' ? l : l.name)),
+    assignee: i.assignee?.login || null,
+    updated_at: i.updated_at,
+  }));
+}
+
+// Best-effort guess at which repo we're sitting in, from a git remote. Lets the
+// dashboard pre-select the obvious answer instead of asking for it.
+//
+// Checks several locations because the answer depends on how the process was
+// started: a launchd server has a cwd of "/", while a CLI run sits in the repo.
+// The package root is always a git checkout of workbench itself.
+export async function detectRepo(cwd = process.cwd()) {
+  const roots = [
+    cwd,
+    dirname(dirname(fileURLToPath(import.meta.url))), // package root
+    process.env.WORKBENCH_WORKER_CWD,
+  ].filter(Boolean);
+
+  const seen = new Set();
+  for (const root of roots) {
+    if (seen.has(root)) continue;
+    seen.add(root);
+    try {
+      const { stdout } = await execFileP('git', ['-C', root, 'remote', 'get-url', 'origin'], { timeout: 5000 });
+      const m = stdout.trim().match(/(?:github\.com[/:]|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?$/);
+      if (m) return m[1];
+    } catch {
+      // not a git checkout — try the next candidate
+    }
+  }
+  return null;
 }
 
 // Find the task linked to a GitHub issue number (meta.github.number).

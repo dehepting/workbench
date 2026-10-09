@@ -369,6 +369,162 @@ export function renewLease(db, id, agent, minutes = 10) {
   return getTask(db, id);
 }
 
+// ---------- github ----------
+
+// Turn GitHub issues into backlog tasks, deduped on the meta.github anchor so a
+// re-import never duplicates work. Returns what happened, per issue, because a
+// silent import is indistinguishable from a broken one.
+export function importIssues(db, projectId, repo, issues, { actor = 'github' } = {}) {
+  const project = getProject(db, projectId);
+  const result = { created: [], skipped: [], linked: [], conflicts: [] };
+
+  for (const issue of issues) {
+    // Dedupe is global, not per-project: one issue is one unit of work, and two
+    // projects bound to the same repo must not each get a card for it. But when
+    // the anchor lives in a DIFFERENT project, say so explicitly — otherwise a
+    // second project bound to the same repo silently imports nothing and looks
+    // broken for no reason it can see.
+    const anchor = anchoredTask(db, repo, issue.number);
+    if (anchor) {
+      if (anchor.project_id === projectId) {
+        result.skipped.push(issue.number);
+      } else {
+        result.conflicts.push({
+          number: issue.number,
+          task_id: anchor.id,
+          other_project: anchor.project_id,
+        });
+      }
+      continue;
+    }
+
+    // An issue that names a task id in its body is already work we track —
+    // adopt it rather than creating a second card for the same work.
+    const claimed = issue.body.match(/\bt_[0-9a-f]{12}\b/)?.[0];
+    if (claimed && taskExists(db, claimed)) {
+      linkGithub(db, claimed, repo, issue.number, issue.url);
+      result.linked.push({ number: issue.number, task_id: claimed });
+      continue;
+    }
+
+    const task = createTask(db, {
+      project_id: projectId,
+      title: issue.title,
+      description: `${issue.body}\n\n_From ${repo}#${issue.number}: ${issue.url}_`,
+      assignee: issue.assignee,
+      labels: issue.labels,
+      // Imported work starts in backlog, not todo: nothing should start running
+      // because a sync happened. A human (or a worker claim) moves it forward.
+      priority: issue.labels.some((l) => /priority|critical/i.test(l)) ? 3 : 0,
+      meta: { github: { repo, number: issue.number, url: issue.url } },
+    }, actor);
+    result.created.push({ number: issue.number, task_id: task.id });
+  }
+
+  audit(db, actor, 'github.import', null, project.id,
+    `${repo}: +${result.created.length} linked ${result.linked.length} skipped ${result.skipped.length} conflicts ${result.conflicts.length}`);
+  return result;
+}
+
+// The task already anchored to an issue, in whatever project owns it.
+function anchoredTask(db, repo, number) {
+  const row = db.prepare('SELECT id, project_id, meta FROM tasks').all()
+    .find((r) => {
+      const gh = parseJson(r.meta, {}).github;
+      return gh?.repo === repo && gh?.number === number;
+    });
+  return row || null;
+}
+
+// Issue numbers already anchored to a task in this repo.
+export function tasksByRepo(db, repo) {
+  const numbers = [];
+  for (const r of db.prepare('SELECT meta FROM tasks').all()) {
+    const meta = parseJson(r.meta, {});
+    if (meta.github?.repo === repo && Number.isInteger(meta.github?.number)) numbers.push(meta.github.number);
+  }
+  return numbers;
+}
+
+// Reconcile board state against GitHub: a closed issue completes its task, and
+// a reopened issue requeues it. Called by the poll loop.
+export function syncIssuesFromGithub(db, projectId, repo, issues, { actor = 'github' } = {}) {
+  const state = new Map(issues.map((i) => [i.number, i]));
+  const moved = [];
+  for (const row of db.prepare('SELECT id, meta, column_name FROM tasks WHERE project_id = ?').all(projectId)) {
+    const gh = parseJson(row.meta, {}).github;
+    if (!gh || gh.repo !== repo) continue;
+    const issue = state.get(gh.number);
+    if (!issue) continue;
+
+    if (issue.state === 'closed' && row.column_name !== 'done') {
+      // force: a reviewed task must be allowed to land in done from a GitHub
+      // close, and the actor guard stops this bouncing back to close the issue.
+      moveTask(db, row.id, 'done', { actor, force: true });
+      addSystemComment(db, row.id, `Closed in GitHub: ${issue.url}`);
+      moved.push({ task_id: row.id, to: 'done' });
+    } else if (issue.state === 'open' && row.column_name === 'done') {
+      moveTask(db, row.id, 'todo', { actor, force: true });
+      addSystemComment(db, row.id, `Reopened in GitHub — back to todo: ${issue.url}`);
+      moved.push({ task_id: row.id, to: 'todo' });
+    }
+  }
+  return { repo, moved };
+}
+
+function taskExists(db, id) {
+  return !!db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(id);
+}
+
+// Push new task comments onto the linked issue, so the repo shows what the
+// agents actually did without anyone copying it over. Which comments have gone
+// out is tracked in the task's meta (pushed_ids) rather than a comments.meta
+// column — no migration for a field only this path reads.
+export async function pushCommentsToIssue(db, taskId) {
+  const t = getTask(db, taskId);
+  const gh = t.meta?.github;
+  if (!gh?.repo || !gh?.number) return { skipped: 'not linked' };
+
+  const token = await getToken();
+  if (!token) return { skipped: 'no token' };
+
+  // Track which comments have gone out by id, not by timestamp: two comments
+  // written in the same millisecond (a worker adding notes in a burst) share a
+  // created_at, and a ">" watermark would silently drop all but the first.
+  const already = new Set(t.meta.github.pushed_ids || []);
+  const pending = listComments(db, taskId)
+    // System comments are board bookkeeping — auto-retry notes, lease chatter,
+    // and this function's own failure reports. Echoing them onto the issue
+    // would spam the repo and, in the failure case, push a note about the
+    // failed push on every retry.
+    .filter((c) => !c.system && c.author !== 'github' && !already.has(c.id));
+  if (!pending.length) return { pushed: 0 };
+
+  let pushed = 0;
+  const sent = [...already];
+  for (const c of pending) {
+    const marker = `<!-- workbench:${c.id} -->`;
+    try {
+      await commentIssue(token, gh.repo, gh.number, `${marker}\n**${c.author}**:\n\n${c.body}`);
+      pushed++;
+      sent.push(c.id);
+    } catch (e) {
+      // Stop at the first failure and record only what actually went out, so
+      // the next sync retries the rest rather than dropping them forever.
+      addSystemComment(db, taskId, `Could not push comment ${c.id} to ${gh.repo}#${gh.number}: ${e.message}`);
+      break;
+    }
+  }
+
+  if (pushed) {
+    // Keep the list bounded — it only has to cover comments still on the task.
+    const meta = { ...t.meta, github: { ...t.meta.github, pushed_ids: sent.slice(-500) } };
+    db.prepare('UPDATE tasks SET meta = ? WHERE id = ?').run(JSON.stringify(meta), taskId);
+    audit(db, 'github', 'task.github_push', taskId, t.project_id, `${gh.repo}#${gh.number}: ${pushed} comment(s)`);
+  }
+  return { pushed };
+}
+
 // Link a task to a GitHub issue (two-way sync anchor).
 export function linkGithub(db, taskId, repo, issueNumber, url) {
   const t = getTask(db, taskId);

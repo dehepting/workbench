@@ -5,6 +5,7 @@ import { createHmac } from 'node:crypto';
 import * as board from './board.js';
 import * as providers from './providers.js';
 import * as github from './github.js';
+import * as sync from './sync.js';
 import { onEvent } from './bus.js';
 
 export function startServer(db) {
@@ -77,6 +78,19 @@ export function startServer(db) {
 
       // --- github ---
       if (m('GET') && path === '/api/github/status') return send(res, 200, await github.githubStatus());
+      if (m('GET') && path === '/api/github/repos') {
+        // The picker's data source: repos this token can see, plus whichever
+        // repo the working directory points at so it can be pre-selected.
+        const token = await github.getToken();
+        if (!token) return send(res, 200, { connected: false, repos: [] });
+        const [repos, detected] = await Promise.all([
+          github.listRepos(token).catch(() => []),
+          github.detectRepo(),
+        ]);
+        return send(res, 200, { connected: true, detected, repos });
+      }
+      if (m('POST') && path === '/api/github/sync') return send(res, 200, await sync.syncAll(db));
+      if (m('POST') && path === '/api/projects/sync') return send(res, 200, await sync.syncProject(db, body.project_id));
       if (m('POST') && path === '/api/github/setup') {
         await github.saveKeychainToken(body.token || '');
         return send(res, 200, await github.githubStatus());
@@ -146,9 +160,21 @@ export function startServer(db) {
     }
   });
 
+  // Poll for GitHub changes. Opt-out for anyone who wants a board with no
+  // outbound network calls at all; on-demand sync still works either way.
+  const syncLoop = process.env.WORKBENCH_SYNC === 'off' ? null : sync.startSyncLoop(db, {
+    onTick: (result) => {
+      if (result.error) return console.error(`[sync] ${result.error}`);
+      const n = result.projects.reduce((a, p) => a + (p.imported?.created?.length || 0), 0);
+      if (n) console.log(`[sync] imported ${n} issue(s) from GitHub`);
+    },
+  });
+
   server.listen(PORT, () => {
     console.log(`workbench → http://localhost:${PORT}  (data: ${process.env.WORKBENCH_DATA || '~/.workbench'})`);
+    if (syncLoop) console.log(`[sync] GitHub poll every ${process.env.WORKBENCH_SYNC_INTERVAL_MS || 60000}ms — set WORKBENCH_SYNC=off to disable`);
   });
+  server.on('close', () => syncLoop?.stop());
   return server;
 }
 

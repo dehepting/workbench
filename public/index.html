@@ -75,6 +75,7 @@
 <div class="overlay" id="taskOverlay"><div class="modal" id="taskModal"></div></div>
 <div class="overlay" id="formOverlay"><div class="modal" id="formModal"></div></div>
 <div class="overlay" id="providersOverlay"><div class="modal" id="providersModal"></div></div>
+<div class="overlay" id="githubOverlay"><div class="modal" id="githubModal"></div></div>
 
 <script>
 const COLUMNS = ['backlog','todo','doing','review','done','failed'];
@@ -312,6 +313,119 @@ async function openProviders() {
   $('#providersOverlay').classList.add('open');
 }
 
+// ---------- github panel ----------
+//
+// A picker, not a prompt: the panel lists the repos the token can see, flags
+// whichever one this working directory points at, and binds on click. Nobody
+// should have to type an owner/repo they can't easily get wrong.
+
+let githubRepos = null; // cached across opens; "Refresh" refetches
+
+async function openGithub() {
+  $('#githubOverlay').classList.add('open');
+  await renderGithub();
+}
+
+async function renderGithub({ refresh = false } = {}) {
+  const el = $('#githubModal');
+  const project = state.projects.find(p => p.id === state.project);
+
+  el.innerHTML = `<h2>GitHub</h2><div class="sub">Loading repos…</div>`;
+
+  let data;
+  try {
+    if (refresh || !githubRepos) githubRepos = await api('/api/github/repos');
+    data = githubRepos;
+  } catch (e) {
+    el.innerHTML = `<h2>GitHub</h2><div class="sub">Could not load repos: ${esc(e.message)}</div>
+      <div class="actions"><button onclick="document.getElementById('githubOverlay').classList.remove('open')">Close</button></div>`;
+    return;
+  }
+
+  const status = data.connected
+    ? `<div class="comment"><span class="who">🟢 Connected</span><span class="deps">Repos are listed from your token — never typed.</span></div>`
+    : `<div class="comment system"><span class="who">⚪ Not connected</span>
+       <span class="deps">Run <code>gh auth login</code>, or POST a token to <code>/api/github/setup</code>.</span></div>`;
+
+  const bound = project?.repo || null;
+  const head = `
+    <h2>GitHub</h2>
+    ${status}
+    <div class="comment">
+      <span class="who">Project: <b>${project ? esc(project.name) : '— none selected —'}</b></span>
+      <span class="deps">${bound
+        ? `mirrors <b>${esc(bound)}</b> — issues become tasks, done tasks close them`
+        : 'not bound to a repo yet — pick one below'}</span>
+    </div>`;
+
+  if (!data.connected) {
+    el.innerHTML = `${head}<div class="actions"><button onclick="document.getElementById('githubOverlay').classList.remove('open')">Close</button></div>`;
+    return;
+  }
+
+  if (!project) {
+    el.innerHTML = `${head}<div class="comment system"><span class="who">Select a project first — a repo binds to one project.</span></div>
+      <div class="actions"><button onclick="document.getElementById('githubOverlay').classList.remove('open')">Close</button></div>`;
+    return;
+  }
+
+  // The repo this checkout points at goes first — it's almost always the answer.
+  const sorted = [...data.repos].sort((a, b) => {
+    if (a.repo === data.detected) return -1;
+    if (b.repo === data.detected) return 1;
+    return String(b.pushed_at || '').localeCompare(String(a.pushed_at || ''));
+  });
+
+  el.innerHTML = `${head}
+    <div class="sub">Pick the repo ${esc(project.name)} mirrors. Click the bound one again to unbind.</div>
+    <div id="repoList">
+      ${sorted.map(r => {
+        const isBound = r.repo === bound;
+        const isDetected = r.repo === data.detected;
+        return `<div class="comment repoRow ${isBound ? 'bound' : ''}" data-repo="${esc(r.repo)}" style="cursor:pointer">
+          <span class="who">${isBound ? '✅' : '⬜'} <b>${esc(r.repo)}</b>
+            ${isDetected ? '· <span title="This is where your terminal is">📍 this checkout</span>' : ''}
+            ${r.private ? '· private' : ''}</span>
+          <span class="deps">${r.open_issues} open issue${r.open_issues === 1 ? '' : 's'} · pushed ${esc(String(r.pushed_at || '—').slice(0, 10))}</span>
+        </div>`;
+      }).join('') || '<div class="comment system"><span class="who">No repos visible to this token.</span></div>'}
+    </div>
+    <div class="actions">
+      <button id="ghSyncBtn">Sync now</button>
+      <button id="ghRefreshBtn">Refresh list</button>
+      <button onclick="document.getElementById('githubOverlay').classList.remove('open')">Close</button>
+      <span id="ghStatus" class="deps"></span>
+    </div>`;
+
+  el.querySelectorAll('.repoRow').forEach(row => {
+    row.onclick = async () => {
+      const repo = row.dataset.repo;
+      const next = repo === bound ? null : repo; // click the bound one to unbind
+      try {
+        await api(`/api/projects/${project.id}/github`, { method: 'POST', body: JSON.stringify({ repo: next }) });
+        state.projects = await api('/api/projects');
+        await renderGithub();
+        renderChips();
+      } catch (e) { $('#ghStatus').textContent = e.message; }
+    };
+  });
+
+  $('#ghSyncBtn').onclick = async () => {
+    const s = $('#ghStatus');
+    s.textContent = 'Syncing…';
+    try {
+      const r = await api('/api/projects/sync', { method: 'POST', body: JSON.stringify({ project_id: project.id }) });
+      const created = r.imported?.created?.length ?? 0;
+      const moved = r.reconciled?.moved?.length ?? 0;
+      const pushed = (r.pushed || []).reduce((a, p) => a + (p.count || 0), 0);
+      s.textContent = r.skipped || `Imported ${created}, moved ${moved}, pushed ${pushed} comment(s)`;
+      if (created || moved) await refresh();
+    } catch (e) { s.textContent = e.message; }
+  };
+
+  $('#ghRefreshBtn').onclick = () => renderGithub({ refresh: true });
+}
+
 // ---------- header wiring ----------
 
 $('#newTaskBtn').onclick = openForm;
@@ -326,27 +440,8 @@ $('#newProjectBtn').onclick = async () => {
   renderProjectSelect(); refresh();
 };
 
-// Bind the selected project to a GitHub repo. The repo is what an issue lands
-// on, what a task's issue is raised against, and what gets closed when done.
-$('#githubBtn').onclick = async () => {
-  if (!state.project) return alert('Pick a project first — a repo binds to one project.');
-  const current = state.projects.find(p => p.id === state.project)?.repo || '';
-  const repo = prompt(
-    current
-      ? `This project mirrors ${current}.\n\nEnter a new owner/repo, or leave blank to unbind:`
-      : 'GitHub repo this project mirrors (owner/repo):',
-    current
-  );
-  if (repo === null) return; // cancelled
-  try {
-    await api(`/api/projects/${state.project}/github`, {
-      method: 'POST',
-      body: JSON.stringify({ repo: repo.trim() || null }),
-    });
-    state.projects = await api('/api/projects');
-    renderChips();
-  } catch (e) { alert(e.message); }
-};
+// GitHub: opens the repo picker. See openGithub() above.
+$('#githubBtn').onclick = openGithub;
 document.querySelectorAll('.overlay').forEach(o => o.addEventListener('click', e => { if (e.target === o) closeModal(); }));
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
