@@ -11,7 +11,9 @@
 export const PROVIDERS = {
   groq: {
     base: 'https://api.groq.com/openai/v1', env: 'GROQ_API_KEY', tier: 'A',
-    models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'qwen/qwen3-30b-a3b-thinking-2507'],
+    // Verified against GET /openai/v1/models — the old llama-3.3-70b-versatile
+    // now 404s, and a stale models[0] is fatal because free:smart picks it first.
+    models: ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-20b'],
   },
   cerebras: {
     base: 'https://api.cerebras.ai/v1', env: 'CEREBRAS_API_KEY', tier: 'A',
@@ -107,6 +109,12 @@ function markOk(name, latencyMs) {
   h.avgLatency = h.avgLatency == null ? latencyMs : Math.round(h.avgLatency * 0.8 + latencyMs * 0.2);
 }
 
+// Test hook — health accumulates for the life of the process, so tests need a
+// clean slate between cases.
+export function resetHealth() {
+  for (const key of Object.keys(health)) delete health[key];
+}
+
 function configured() {
   return Object.entries(PROVIDERS)
     .filter(([name, p]) => keyOf(p) && !isSick(name))
@@ -118,11 +126,17 @@ function resolveCandidates(model = 'free:smart') {
   const pool = configured();
   if (!pool.length) return [];
 
-  // Explicit "provider/model" — go straight there.
-  const slash = model.includes('/') && !model.startsWith('free:') ? model.split('/') : null;
-  if (slash && PROVIDERS[slash[0]] && keyOf(PROVIDERS[slash[0]])) {
-    const p = PROVIDERS[slash[0]];
-    return [{ name: slash[0], base: p.base, apiKey: keyOf(p), models: [slash[1]], tier: p.tier, modelId: slash[1] }];
+  // Explicit "provider/model" — go straight there. Split on the FIRST slash
+  // only: model ids routinely contain their own ('openai/gpt-oss-120b',
+  // 'meta-llama/…'), and splitting on every slash silently requested "openai".
+  const firstSlash = model.indexOf('/');
+  if (firstSlash > 0 && !model.startsWith('free:')) {
+    const provider = model.slice(0, firstSlash);
+    const rest = model.slice(firstSlash + 1);
+    const p = PROVIDERS[provider];
+    if (p && keyOf(p)) {
+      return [{ name: provider, base: p.base, apiKey: keyOf(p), models: [rest], tier: p.tier, modelId: rest }];
+    }
   }
 
   // Explicit bare model name — every provider that serves it.
@@ -164,7 +178,10 @@ function estimateCost(provider, tokensIn, tokensOut) {
 export async function chat(messages, { model = 'free:smart', max_tokens = 2048, temperature = 0.7 } = {}) {
   const plan = resolveCandidates(model);
   if (!plan.length) {
-    throw new Error('No providers configured. Add API keys to your .env file — see .env.example');
+    const anyKey = Object.values(PROVIDERS).some((p) => keyOf(p));
+    throw new Error(anyKey
+      ? `No candidate for model "${model}" — no configured provider serves it, or they are in cooldown. Try "free:smart".`
+      : 'No providers configured. Add API keys to your .env file — see .env.example');
   }
 
   const errors = [];
@@ -186,6 +203,11 @@ export async function chat(messages, { model = 'free:smart', max_tokens = 2048, 
       }
       if (!res.ok) {
         const body = await res.text().catch(() => '');
+        // Count every failure against health, not just 429/402/5xx: a 404 for
+        // a retired model or a 401 for a revoked key never heals on its own,
+        // and skipping markFail here left the panel reporting a provider as
+        // healthy while every single call to it was failing.
+        markFail(cand.name);
         errors.push(`${cand.name}: ${res.status} ${body.slice(0, 120)}`);
         continue;
       }
