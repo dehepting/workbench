@@ -66,6 +66,7 @@
   <select id="projectSelect"></select>
   <button id="newProjectBtn" title="Create project">+ Project</button>
   <button id="newTaskBtn" class="primary">+ New task</button>
+  <button id="githubBtn" title="GitHub repo this project mirrors">GitHub</button>
   <button id="providersBtn" title="Inference provider status">⚡ Providers</button>
   <div class="chips" id="chips"></div>
 </header>
@@ -130,6 +131,7 @@ function renderChips() {
   const s = state.stats, l = state.ledger;
   const up = (state.providers?.providers || []).filter(p => p.healthy).length;
   const total = (state.providers?.providers || []).length;
+  const repo = state.project ? state.projects.find(p => p.id === state.project)?.repo : null;
   $('#chips').innerHTML = [
     `<span class="chip">WIP <b>${s?.wip ?? 0}</b></span>`,
     `<span class="chip">Done today <b>${s?.doneToday ?? 0}</b></span>`,
@@ -138,6 +140,9 @@ function renderChips() {
     `<span class="chip">Failed <b>${s?.failed ?? 0}</b></span>`,
     `<span class="chip">Spend <b>$${l?.total?.cost ?? 0}</b></span>`,
     `<span class="chip" title="Healthy inference providers">⚡ <b>${up}/${total}</b></span>`,
+    repo
+      ? `<span class="chip" title="Issues on this repo become tasks; done tasks close them">↔ <b>${esc(repo)}</b></span>`
+      : `<span class="chip" title="Bind this project to a repo with the GitHub button">↔ no repo</span>`,
   ].join('');
 }
 
@@ -319,6 +324,28 @@ $('#newProjectBtn').onclick = async () => {
   state.projects = await api('/api/projects');
   state.project = p.id;
   renderProjectSelect(); refresh();
+};
+
+// Bind the selected project to a GitHub repo. The repo is what an issue lands
+// on, what a task's issue is raised against, and what gets closed when done.
+$('#githubBtn').onclick = async () => {
+  if (!state.project) return alert('Pick a project first — a repo binds to one project.');
+  const current = state.projects.find(p => p.id === state.project)?.repo || '';
+  const repo = prompt(
+    current
+      ? `This project mirrors ${current}.\n\nEnter a new owner/repo, or leave blank to unbind:`
+      : 'GitHub repo this project mirrors (owner/repo):',
+    current
+  );
+  if (repo === null) return; // cancelled
+  try {
+    await api(`/api/projects/${state.project}/github`, {
+      method: 'POST',
+      body: JSON.stringify({ repo: repo.trim() || null }),
+    });
+    state.projects = await api('/api/projects');
+    renderChips();
+  } catch (e) { alert(e.message); }
 };
 document.querySelectorAll('.overlay').forEach(o => o.addEventListener('click', e => { if (e.target === o) closeModal(); }));
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });

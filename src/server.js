@@ -61,6 +61,13 @@ export function startServer(db) {
       // --- projects ---
       if (m('GET') && path === '/api/projects') return send(res, 200, board.listProjects(db));
       if (m('POST') && path === '/api/projects') return send(res, 201, board.createProject(db, body.name, body));
+
+      // project ↔ repo binding: which GitHub repo this project mirrors.
+      // Pass { repo: null } to unbind.
+      const projGhMatch = path.match(/^\/api\/projects\/([\w-]+)\/github$/);
+      if (projGhMatch && m('POST')) {
+        return send(res, 200, board.bindProjectRepo(db, projGhMatch[1], body.repo));
+      }
       const projMatch = path.match(/^\/api\/projects\/([\w-]+)(\/wip)?$/);
       if (projMatch) {
         const id = projMatch[1];
@@ -111,14 +118,17 @@ export function startServer(db) {
         const token = await github.getToken();
         if (!token) return send(res, 400, { error: 'GitHub not connected — run `gh auth login` or POST a token to /api/github/setup' });
         const t = board.getTask(db, ghMatch[1]);
-        if (!body.repo || !body.repo.includes('/')) return send(res, 400, { error: 'repo must be owner/repo' });
-        const issue = await github.createIssue(token, body.repo, {
+        // Default to the project's bound repo, so a linked project doesn't have
+        // to restate owner/repo on every single issue it raises.
+        const repo = body.repo || t.meta?.github?.repo || board.getProject(db, t.project_id).repo;
+        if (!repo?.includes('/')) return send(res, 400, { error: 'repo must be owner/repo — bind one to the project or pass { repo }' });
+        const issue = await github.createIssue(token, repo, {
           title: t.title,
           body: `${t.description || ''}\n\n_Workbench task ${t.id} — track it at http://localhost:4173_`,
           labels: body.labels || (t.labels || []),
         });
-        const linked = board.linkGithub(db, t.id, body.repo, issue.number, issue.html_url);
-        await github.commentIssue(token, body.repo, issue.number, `Linked to Workbench task \`${t.id}\``);
+        const linked = board.linkGithub(db, t.id, repo, issue.number, issue.html_url);
+        await github.commentIssue(token, repo, issue.number, `Linked to Workbench task \`${t.id}\``);
         return send(res, 201, linked);
       }
 

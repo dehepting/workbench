@@ -84,5 +84,13 @@ export function openStore(dir) {
     // column already present — fine
   }
 
+  // Projects need somewhere to remember which GitHub repo they mirror — without
+  // it, an imported issue had to land on "whichever project was created last".
+  try {
+    db.exec("ALTER TABLE projects ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'");
+  } catch {
+    // column already present — fine
+  }
+
   return db;
 }

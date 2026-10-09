@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { emit } from './bus.js';
 import { PRICES, DEFAULT_PRICE } from './providers.js';
+import { getToken, commentIssue, closeIssue } from './github.js';
 
 export const COLUMNS = ['backlog', 'todo', 'doing', 'review', 'done', 'failed'];
 
@@ -82,14 +83,51 @@ export function createProject(db, name, { clientView = false } = {}) {
 }
 
 export function listProjects(db) {
-  return db.prepare('SELECT * FROM projects ORDER BY created_at DESC').all();
+  return db.prepare('SELECT * FROM projects ORDER BY created_at DESC').all().map(withRepo);
+}
+
+// A project mirrors one GitHub repo. Stored in projects.meta so the import and
+// sync paths have a home — without this, an incoming issue had to be attached
+// to whichever project happened to be created last.
+export function bindProjectRepo(db, projectId, repo) {
+  const project = getProject(db, projectId); // 404s loudly rather than writing meta to a ghost
+  const meta = repo
+    ? { ...project.meta, github: { repo: parseRepo(repo) } }
+    : stripRepo(project.meta);
+  db.prepare('UPDATE projects SET meta = ? WHERE id = ?').run(JSON.stringify(meta), projectId);
+  audit(db, 'system', 'project.github_bind', null, projectId, repo || '(unbind)');
+  emit('project.update', { id: projectId, repo: repo || null });
+  return getProject(db, projectId);
+}
+
+// "owner/repo" only — anything else is a typo we'd otherwise discover on the
+// first API call, as a confusing 404 from the wrong URL.
+export function parseRepo(repo) {
+  const value = String(repo || '').trim();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(value)) {
+    fail('bad_request', `Not a repo ("owner/repo"): "${repo}"`);
+  }
+  return value;
+}
+
+function stripRepo(meta) {
+  const { github, ...rest } = meta;
+  return rest;
+}
+
+function withRepo(p) {
+  const meta = parseJson(p.meta, {});
+  return { ...p, meta, repo: meta.github?.repo || null };
 }
 
 export function getProject(db, id) {
   const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
   if (!p) fail('not_found', `Project ${id} not found`);
+  const meta = parseJson(p.meta, {});
   return {
     ...p,
+    meta,
+    repo: meta.github?.repo || null,
     client_view: !!p.client_view,
     tasks: db.prepare('SELECT * FROM tasks WHERE project_id = ? ORDER BY priority DESC, created_at ASC').all(id).map(hydrate),
     wip: db.prepare('SELECT column_name, limit_value FROM wip WHERE project_id = ?').all(id),
@@ -227,6 +265,13 @@ export function moveTask(db, id, to, { actor = 'system', force = false } = {}) {
   audit(db, actor, 'task.move', id, t.project_id, `${t.column_name} -> ${to}`);
   emit('task.move', { id, project_id: t.project_id, from: t.column_name, to, actor });
 
+  // Closing the mirror issue has to happen here, not in a bus listener: the bus
+  // is in-process, and a task reaches 'done' from the worker, from MCP, and from
+  // the HTTP API. A listener registered by the server would silently miss every
+  // worker-driven completion. Fire-and-forget — a board move must not block on,
+  // or fail because of, GitHub's availability.
+  if (to === 'done' && t.column_name !== 'done') closeMirrorIssue(db, id, actor);
+
   // Chaining: completing a task can auto-create a follow-up
   if (to === 'done' && t.next_task_title) {
     const chained = createTask(db, {
@@ -333,6 +378,41 @@ export function linkGithub(db, taskId, repo, issueNumber, url) {
   audit(db, 'github', 'task.github_link', taskId, t.project_id, `${repo}#${issueNumber}`);
   emit('task.update', { id: taskId, project_id: t.project_id, actor: 'github' });
   return getTask(db, taskId);
+}
+
+// A completed task closes its mirror issue and leaves the result on it, so the
+// repo shows what happened without anyone re-typing it. Deliberately best-effort:
+// called from moveTask, it must never turn a completed task back into a failure
+// because GitHub was unreachable or the token expired. Every outcome is recorded
+// on the task rather than only in a log nobody reads.
+export async function closeMirrorIssue(db, taskId, actor = 'system') {
+  const t = getTask(db, taskId);
+  // getTask() already hydrates meta — parsing the object again JSON.parse-throws
+  // and quietly returns {}, which made every linked task look unlinked.
+  const gh = t.meta?.github;
+  if (!gh?.repo || !gh?.number) return { skipped: 'not linked' };
+
+  // Only close issues we are not the source of — the webhook already closed it.
+  if (actor === 'github') return { skipped: 'actor is github' };
+
+  const token = await getToken();
+  if (!token) {
+    addSystemComment(db, taskId, `Task is done but ${gh.repo}#${gh.number} was left open: no GitHub token (run \`gh auth login\`)`);
+    return { skipped: 'no token' };
+  }
+
+  try {
+    const completed = [...listComments(db, taskId)].reverse().find((c) => c.body.startsWith('completed:'));
+    const summary = completed ? completed.body.replace(/^completed:\s*/, '').slice(0, 2000) : `Workbench task ${taskId} is done.`;
+    await commentIssue(token, gh.repo, gh.number, `Completed by Workbench task \`${taskId}\`:\n\n${summary}`);
+    await closeIssue(token, gh.repo, gh.number);
+    audit(db, actor, 'task.github_close', taskId, t.project_id, `${gh.repo}#${gh.number}`);
+    emit('task.update', { id: taskId, project_id: t.project_id, actor });
+    return { closed: `${gh.repo}#${gh.number}` };
+  } catch (e) {
+    addSystemComment(db, taskId, `Done, but could not close ${gh.repo}#${gh.number}: ${e.message}`);
+    return { error: e.message };
+  }
 }
 
 // ---------- comments ----------
