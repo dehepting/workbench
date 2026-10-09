@@ -71,14 +71,15 @@ export const PROVIDERS = {
   },
 };
 
-// $ per 1M tokens [input, output] — used only to estimate ledger cost.
-const PRICES = {
+// $ per 1M tokens [input, output] — used to estimate ledger cost.
+// Shared with src/board.js so both paths price a model the same way.
+export const PRICES = {
   groq: [0, 0], cerebras: [0, 0], google: [0, 0], nvidia: [0, 0], mistral: [0, 0],
   openrouter: [0, 0], zai: [0, 0], sambanova: [0, 0],
   deepinfra: [0.03, 0.05], dashscope: [0.4, 1.2], together: [0.88, 0.88],
   fireworks: [0.9, 0.9], siliconflow: [0.14, 0.14], hyperbolic: [0.4, 0.8], perplexity: [1, 1],
 };
-const DEFAULT_PRICE = [0.15, 0.6];
+export const DEFAULT_PRICE = [0.15, 0.6];
 
 // Rolling health per provider.
 const health = {}; // { provider: { fails, avgLatency, lastFailAt } }

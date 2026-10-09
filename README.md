@@ -180,6 +180,18 @@ await wb('wb_record_run', { agent: 'coder-1', model: 'groq/llama-3.3-70b', token
 | `WORKBENCH_AGENT` | `worker-1` | default worker agent name |
 | `WORKBENCH_POLL_MS` | `4000` | worker idle poll interval |
 
+## Tests
+
+```bash
+npm test        # zero dependencies — node's built-in test runner
+```
+
+Covers the dashboard script (a single unbalanced brace once made every click
+in the UI a no-op), the board's gates (DAG deps, WIP limits, review gate,
+leases, auto-retry, chaining), the cost ledger's price resolution, SSE, and the
+worker's shell-quoting. CI runs the same suite plus a compile of the menu-bar
+app on every push (`.github/workflows/ci.yml`).
+
 ## Roadmap
 
 - [ ] Per-agent API keys with roles

@@ -6,7 +6,7 @@ import { complete } from './model.js';
 const execFileP = promisify(execFile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function buildPrompt(task) {
+export function buildPrompt(task) {
   const parts = [`Task: ${task.title}`];
   if (task.description) parts.push(`\nDescription:\n${task.description}`);
   if (task.labels?.length) parts.push(`\nLabels: ${task.labels.join(', ')}`);
@@ -18,8 +18,23 @@ function buildPrompt(task) {
 // WORKBENCH_WORKER_EXEC lets the worker shell out to a real coding agent
 // (Claude Code, OpenCode, Aider, ...) instead of doing plain LLM completion.
 // {prompt} in the template is replaced with a safely-quoted prompt.
+
+// POSIX single-quoting: the payload arrives byte-for-byte — real newlines stay
+// real, and `$`, backticks and quotes can't be interpreted by the shell.
+export const shQuote = (s) => `'${String(s).replaceAll("'", "'\\''")}'`;
+
+// Templates may quote the placeholder (`claude -p "{prompt}"`, as the README
+// used to show) or leave it bare (`claude -p {prompt}`). Strip the template's
+// own quotes before substituting ours, so quoting never nests.
+export function substitutePrompt(template, prompt) {
+  const q = shQuote(prompt);
+  if (template.includes('"{prompt}"')) return template.replace('"{prompt}"', q);
+  if (template.includes("'{prompt}'")) return template.replace("'{prompt}'", q);
+  return template.replaceAll('{prompt}', q);
+}
+
 async function runExec(template, prompt) {
-  const shellCmd = template.replaceAll('{prompt}', JSON.stringify(prompt));
+  const shellCmd = substitutePrompt(template, prompt);
   const { stdout, stderr } = await execFileP('/bin/sh', ['-lc', shellCmd], {
     maxBuffer: 10 * 1024 * 1024,
     timeout: 30 * 60 * 1000, // 30 min hard cap

@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # node:sqlite is used without a flag from Node 24 on; Node 22 still
+        # gates it behind --experimental-sqlite, so 24 is what we verify.
+        node: [24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # zero dependencies — no install step
+      - run: npm test
+
+  menu-bar-app:
+    name: menu bar app compiles
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: mkdir -p build && swiftc -O -o build/WorkbenchMenu macos/menu.swift

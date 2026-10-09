@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { emit } from './bus.js';
+import { PRICES, DEFAULT_PRICE } from './providers.js';
 
 export const COLUMNS = ['backlog', 'todo', 'doing', 'review', 'done', 'failed'];
 
@@ -349,19 +350,24 @@ export function addTaskComment(db, id, author, body) {
 
 // ---------- runs / cost ledger ----------
 
-// $ per 1M tokens [input, output]. Free tiers are zero; extend as needed.
-const PRICES = {
-  groq: [0, 0], cerebras: [0, 0], nvidia: [0, 0], mistral: [0, 0],
-  'openrouter:free': [0, 0], google: [0, 0], cloudflare: [0, 0],
-  deepinfra: [0.03, 0.05],
-};
-const DEFAULT_PRICE = [0.15, 0.6];
+// $ per 1M tokens [input, output] — table imported from providers.js (top of
+// file) so the ledger and the router never drift apart.
+
+// Accepts a bare model id, a provider name, or the documented
+// "provider/model" form — "groq/llama-3.3-70b" must price as groq (free),
+// not fall through to the paid default.
+function priceFor(model) {
+  if (!model) return DEFAULT_PRICE;
+  if (PRICES[model]) return PRICES[model];
+  const head = model.split('/')[0].split(':')[0];
+  return PRICES[head] ?? DEFAULT_PRICE;
+}
 
 export function recordRun(db, { agent, model, tokens_in = 0, tokens_out = 0, cost = null, task_id = null }) {
   if (!agent) fail('bad_request', 'agent required');
   if (task_id) getTask(db, task_id);
   if (cost == null) {
-    const [pin, pout] = PRICES[model] ?? DEFAULT_PRICE;
+    const [pin, pout] = priceFor(model);
     cost = +(((tokens_in / 1e6) * pin) + ((tokens_out / 1e6) * pout)).toFixed(6);
   }
   const id = uid('r');
