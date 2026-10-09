@@ -27,7 +27,13 @@ export function depContext(db, ids, { limit = DEP_OUTPUT_LIMIT } = {}) {
   }).join('\n\n');
 }
 
-export function buildPrompt(task, deps = '') {
+// The acceptance clause has to match the execution mode, or it actively fights
+// the agent. In pooled mode there is no filesystem — the text IS the
+// deliverable. In exec mode that same instruction is backwards: the agent was
+// told the deliverable must be in its final message and not to describe files
+// it hadn't written, so it complied by writing a full spec into a comment and
+// committing nothing to the repo. Green task, empty repository.
+export function buildPrompt(task, deps = '', { mode = 'pooled' } = {}) {
   const parts = [`Task: ${task.title}`];
   if (task.description) parts.push(`\nDescription:\n${task.description}`);
   if (task.labels?.length) parts.push(`\nLabels: ${task.labels.join(', ')}`);
@@ -36,21 +42,35 @@ export function buildPrompt(task, deps = '') {
       ? `\n## Depends on (already completed)\n${deps}`
       : `\nDepends on (already completed): ${task.deps.join(', ')}`);
   }
-  parts.push(
-    '\n\nAcceptance: the work described above is complete. Your final message must contain '
-    + 'the deliverable itself — do not describe a file or document you did not actually write. '
-    + 'Report exactly what you did.',
-    // A pooled model asked for a comparison table will fill gaps rather than
-    // admit them: it produced a doc recommending GROQ_MODEL=groq-2-turbo, a
-    // model that has never existed, and invented an entire "pre-2025 free
-    // tier" column the research never covered. Every specific is verifiable,
-    // so pin the model to its evidence instead of hoping it self-edits.
+  // A pooled model asked for a comparison table will fill gaps rather than
+  // admit them: it produced a doc recommending GROQ_MODEL=groq-2-turbo, a
+  // model that has never existed, and invented an entire "pre-2025 free
+  // tier" column the research never covered. Every specific is verifiable,
+  // so pin the model to its evidence instead of hoping it self-edits.
+  const evidenceRules =
     '\nGround rules: draw only on the evidence above. Where a needed fact is missing, '
     + 'write "not recorded" rather than estimating — a stated gap is useful, a guessed '
     + 'number is worse than none. Keep every source citation from the research verbatim; '
     + 'never invent model names, prices, limits, or dates, and never present a comparison '
-    + 'for a column you have no evidence about.',
-  );
+    + 'for a column you have no evidence about.';
+
+  if (mode === 'exec') {
+    parts.push(
+      '\n\nAcceptance: the work described above is complete and committed to this repository. '
+      + 'Write the deliverable into real files, then commit them with a message stating what '
+      + 'changed and why. Do not push. Your final message lists the files you created or '
+      + 'changed and the commit hash — a summary of work that exists on disk, never a '
+      + 'substitute for it. If you cannot write a file, say so explicitly instead of '
+      + 'describing work you did not do.',
+    );
+  } else {
+    parts.push(
+      '\n\nAcceptance: the work described above is complete. Your final message must contain '
+      + 'the deliverable itself — do not describe a file or document you did not actually write. '
+      + 'Report exactly what you did.',
+    );
+  }
+  parts.push(evidenceRules);
   return parts.join('\n');
 }
 
@@ -94,6 +114,32 @@ export async function runExec(template, prompt, { cwd = process.env.WORKBENCH_WO
 // One pull → work → advance cycle. Exported so the failure path is testable:
 // it used to crash the whole worker, which meant auto-retry never ran.
 // Returns the task it worked on, or null when the queue is empty.
+// Agents emit whatever their --format says. A JSONL event stream is useful
+// machine output but catastrophic as a task comment: the first run stored
+// 188KB of step_start/tool_use events, which buries the one paragraph a
+// reviewer actually needs. Collapse JSONL to its final text message; pass
+// anything else through untouched.
+export function normalizeAgentOutput(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text.startsWith('{')) return text;
+
+  const events = text.split('\n').map((l) => {
+    try { return JSON.parse(l); } catch { return null; }
+  }).filter(Boolean);
+  // Only treat it as an event stream if every line parsed — a lone JSON blob
+  // (an error body, say) is not one.
+  if (events.length !== text.split('\n').filter((l) => l.trim()).length) return text;
+
+  const texts = events
+    .filter((e) => e.type === 'text' && typeof e.part?.text === 'string')
+    .map((e) => e.part.text);
+  if (!texts.length) return text;
+
+  const last = texts[texts.length - 1].trim();
+  const cost = events.find((e) => e.type === 'step_finish')?.cost;
+  return cost != null ? `${last}\n\n(agent reported est. $${Number(cost).toFixed(4)} of model spend)` : last;
+}
+
 export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd = undefined } = {}) {
   const task = board.nextTask(db, agent, { minutes: leaseMinutes });
   if (!task || task.empty) return null;
@@ -112,7 +158,9 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
 
     let output;
     if (exec) {
-      output = await runExec(exec, buildPrompt(task, deps), { cwd });
+      output = normalizeAgentOutput(
+        await runExec(exec, buildPrompt(task, deps, { mode: 'exec' }), { cwd }),
+      );
     } else {
       const r = await complete(db, { prompt: buildPrompt(task, deps), agent, task_id: task.id });
       output = `${r.text}\n\n(model: ${r.model} via ${r.provider} — ${r.tokens_in}in/${r.tokens_out}out tokens, est. $${r.cost})`;

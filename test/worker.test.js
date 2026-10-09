@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { shQuote, substitutePrompt, shellCommand, runExec, buildPrompt } from '../src/worker.js';
+import { shQuote, substitutePrompt, shellCommand, runExec, buildPrompt, normalizeAgentOutput } from '../src/worker.js';
 
 let tmp, echoScript;
 
@@ -87,6 +87,51 @@ test('acceptance demands the deliverable itself, not a description of one', () =
   assert.match(prompt, /final message must contain the deliverable itself/i);
   assert.match(prompt, /did not actually write/i);
   assert.match(prompt, /Report exactly what you did/);
+});
+
+test('exec mode demands committed files, not a message-only deliverable', () => {
+  // Regression: the pooled acceptance clause was used for exec agents too. It
+  // told them the deliverable must be in the final message and not to describe
+  // files they hadn't written — so the agent complied by writing a full spec
+  // into a comment and committing nothing. Task went green, repo stayed empty.
+  const prompt = buildPrompt({ title: 'Build the ingestion layer' }, '', { mode: 'exec' });
+  assert.match(prompt, /committed to this repository/i);
+  assert.match(prompt, /real files/i);
+  assert.match(prompt, /commit hash/i);
+  assert.match(prompt, /If you cannot write a file, say so explicitly/i);
+  assert.doesNotMatch(prompt, /final message must contain the deliverable itself/i,
+    'the pooled clause would tell an exec agent the message IS the deliverable');
+});
+
+test('pooled mode still gets the message-only clause', () => {
+  const prompt = buildPrompt({ title: 'Anything' }, '', { mode: 'pooled' });
+  assert.match(prompt, /final message must contain the deliverable itself/i);
+});
+
+test('normalizeAgentOutput collapses a JSONL event stream to the final message', () => {
+  // The first exec run stored 188KB of step_start/tool_use events as the task
+  // comment, burying the one paragraph a reviewer needs.
+  const stream = [
+    JSON.stringify({ type: 'step_start', timestamp: 1 }),
+    JSON.stringify({ type: 'text', part: { text: 'I will start by reading the file.' } }),
+    JSON.stringify({ type: 'tool_use', part: { tool: 'shell' } }),
+    JSON.stringify({ type: 'text', part: { text: '## The actual findings\n\nHere they are.' } }),
+    JSON.stringify({ type: 'step_finish', cost: 0.0123 }),
+  ].join('\n');
+
+  const out = normalizeAgentOutput(stream);
+  assert.match(out, /## The actual findings/, 'keeps the final message');
+  assert.doesNotMatch(out, /step_start|tool_use/, 'drops the event noise');
+  assert.match(out, /\$0\.0123/, 'and surfaces the spend, which the stream carried');
+});
+
+test('normalizeAgentOutput passes plain text and stray JSON through untouched', () => {
+  assert.equal(normalizeAgentOutput('just prose\nwith lines'), 'just prose\nwith lines');
+  assert.equal(normalizeAgentOutput(''), '');
+  // A single JSON blob (an error body, say) is not an event stream.
+  assert.equal(normalizeAgentOutput('{"message":"Forbidden"}'), '{"message":"Forbidden"}');
+  // Half-parsed lines mean it isn't JSONL — don't mangle it.
+  assert.equal(normalizeAgentOutput('{"type":"text"}\nnot json'), '{"type":"text"}\nnot json');
 });
 
 test('the prompt pins the model to its evidence instead of inviting invention', () => {
