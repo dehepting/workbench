@@ -144,6 +144,29 @@ export function normalizeAgentOutput(raw) {
   return cost != null ? `${last}\n\n(agent reported est. $${Number(cost).toFixed(4)} of model spend)` : last;
 }
 
+// Remedy 1 + 5: preserve agent receipt in the worktree so visibility survives cleanup.
+// Writes a last-run.json snapshot with commit hash, files changed, and a preview
+// of the agent's final message. Also records the same in task.meta so the receipt
+// survives even if the worktree is removed.
+export async function writeLastRunSnapshot(work, task, output) {
+  const { execFileSync } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const commitHash = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: work.dir, encoding: 'utf8' }).trim();
+  const status = execFileSync('git', ['status', '--short'], { cwd: work.dir, encoding: 'utf8' }).trim();
+  const filesChanged = status.split('\n').filter(Boolean).map((l) => l.slice(3));
+  const snapshot = {
+    taskId: task.id,
+    title: task.title,
+    commitHash,
+    branch: git.branchFor(task.id),
+    filesChanged,
+    outputPreview: (output || '').slice(0, 500),
+    completedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(join(work.dir, 'last-run.json'), JSON.stringify(snapshot, null, 2));
+  return snapshot;
+}
+
 // Prepare a worktree for an exec-mode agent. Each task in review gets its own
 // branch and worktree cut from origin/main, so the agent's changes are always
 // diffable against the base, and two tasks never stomp each other's working tree.
@@ -220,7 +243,26 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
         // Only raise a PR for repo work. A task with no repo bound, or one the
         // agent ran outside a worktree, has nothing to diff.
         if (work) pr = await openPullRequest(project, task, work, output);
+
+        // Remedy 1 + 5: preserve agent receipt in the worktree so visibility survives cleanup.
+        try {
+          const snapshot = await writeLastRunSnapshot(work, task, output);
+          // Also record in task meta so the receipt survives worktree cleanup.
+          const meta = task.meta || {};
+          meta.lastRun = snapshot;
+          board.updateTask(db, task.id, { meta });
+        } catch { /* non-fatal: snapshot is a convenience, not a requirement */ }
       } finally {
+        // Remedy 1 + 5: preserve agent receipt in the worktree so visibility survives cleanup.
+        // Runs in finally so it survives PR errors (e.g. no commits between base and branch).
+        if (work) {
+          try {
+            const snapshot = await writeLastRunSnapshot(work, task, output);
+            const meta = task.meta || {};
+            meta.lastRun = snapshot;
+            board.updateTask(db, task.id, { meta });
+          } catch { /* non-fatal: snapshot is a convenience, not a requirement */ }
+        }
         // Cleanup must not depend on the try block succeeding — a failed agent
         // still leaves a worktree behind, and leaked worktrees accumulate until
         // `git worktree prune` is someone's problem.
