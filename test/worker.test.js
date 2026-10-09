@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { shQuote, substitutePrompt, buildPrompt } from '../src/worker.js';
+import { shQuote, substitutePrompt, shellCommand, runExec, buildPrompt } from '../src/worker.js';
 
 let tmp, echoScript;
 
@@ -62,6 +62,24 @@ test('substitutePrompt strips the template\'s own quotes before adding ours', ()
   assert.equal(inner, "claude -p 'it'\\''s'");
   assert.ok(!inner.includes('""'), 'quotes must not nest');
   assert.ok(!inner.includes(`'it's'`), 'single quotes must not nest');
+});
+
+// Regression: without the subshell stdin redirect these hang forever (the
+// worker's only escape was its 30-minute timeout, followed by 3 auto-retries).
+test('runExec does not hang on a command that reads stdin', { timeout: 10_000 }, async () => {
+  const t0 = Date.now();
+  const out = await runExec('cat', 'prompt goes to argv, never to stdin');
+  assert.equal(out, '(no output)');
+  assert.ok(Date.now() - t0 < 5_000, 'cat must have hit EOF on /dev/null immediately');
+});
+
+test('pipes inside a template still supply their own stdin', { timeout: 10_000 }, async () => {
+  const out = await runExec('printf %s {prompt} | tr a-z A-Z', 'abc def');
+  assert.equal(out, 'ABC DEF');
+});
+
+test('shellCommand wraps the template and redirects stdin', () => {
+  assert.equal(shellCommand('echo hi', 'p'), "(echo hi) < /dev/null");
 });
 
 test('buildPrompt assembles a task into an agent prompt', () => {
