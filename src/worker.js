@@ -1,6 +1,10 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import * as board from './board.js';
+import * as git from './git.js';
+import * as github from './github.js';
 import { complete } from './model.js';
 
 const execFileP = promisify(execFile);
@@ -140,6 +144,49 @@ export function normalizeAgentOutput(raw) {
   return cost != null ? `${last}\n\n(agent reported est. $${Number(cost).toFixed(4)} of model spend)` : last;
 }
 
+// Prepare a worktree for an exec-mode agent. Each task in review gets its own
+// branch and worktree cut from origin/main, so the agent's changes are always
+// diffable against the base, and two tasks never stomp each other's working tree.
+// The return value has .cloneDir (the repo clone) and .dir (the worktree) and
+// .base (the branch the worktree was cut from). If the task has no bound repo,
+// returns null.
+export async function prepareWorktree(project, task) {
+  const repo = project.repo;
+  if (!repo) return null;
+
+  const reposDir = join(homedir(), '.workbench', 'repos');
+  const cloneDir = await git.ensureClone(repo, reposDir);
+
+  const work = await git.createWorktree(cloneDir, task.id, { worktreesDir: join(homedir(), '.workbench', 'worktrees') });
+  return { cloneDir, dir: work.dir, base: work.base };
+}
+
+// Open a PR for the work the agent just finished. The PR title and body carry
+// the task's ID and title so a reviewer can find the originating task without
+// chasing comments.
+export async function openPullRequest(project, task, work, output) {
+  const token = await github.getToken();
+  if (!token) return null;
+
+  const body = [
+    output || '',
+    '',
+    `---`,
+    `_Workbench task \`${task.id}\` — ${project.repo} — ${project.name || ''}_`,
+  ].join('\n');
+
+  const pr = await github.createPullRequest(token, project.repo, {
+    title: task.title,
+    body,
+    head: git.branchFor(task.id),
+    base: project.base || 'main',
+  });
+
+  // If the task's merge status changes before a human reviews it, that's
+  // visible in the PR itself; we only record that a PR was created.
+  return pr;
+}
+
 export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd = undefined } = {}) {
   const task = board.nextTask(db, agent, { minutes: leaseMinutes });
   if (!task || task.empty) return null;
@@ -157,10 +204,24 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
     board.moveTask(db, task.id, 'doing', { actor: agent });
 
     let output;
+    let pr = null;
     if (exec) {
-      output = normalizeAgentOutput(
-        await runExec(exec, buildPrompt(task, deps, { mode: 'exec' }), { cwd }),
-      );
+      const project = board.getProject(db, task.project_id);
+      const work = project.repo ? await prepareWorktree(project, task) : null;
+
+      try {
+        output = normalizeAgentOutput(
+          await runExec(exec, buildPrompt(task, deps, { mode: 'exec' }), { cwd: work?.dir ?? cwd }),
+        );
+        // Only raise a PR for repo work. A task with no repo bound, or one the
+        // agent ran outside a worktree, has nothing to diff.
+        if (work) pr = await openPullRequest(project, task, work, output);
+      } finally {
+        // Cleanup must not depend on the try block succeeding — a failed agent
+        // still leaves a worktree behind, and leaked worktrees accumulate until
+        // `git worktree prune` is someone's problem.
+        if (work) await git.removeWorktree(work.cloneDir, work.dir).catch(() => {});
+      }
     } else {
       const r = await complete(db, { prompt: buildPrompt(task, deps), agent, task_id: task.id });
       output = `${r.text}\n\n(model: ${r.model} via ${r.provider} — ${r.tokens_in}in/${r.tokens_out}out tokens, est. $${r.cost})`;
@@ -168,7 +229,7 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
 
     board.addTaskComment(db, task.id, agent, `completed:\n${output}`);
     board.moveTask(db, task.id, task.requires_review ? 'review' : 'done', { actor: agent });
-    console.log(`[${agent}] done: ${task.id} "${task.title}"`);
+    console.log(`[${agent}] done: ${task.id} "${task.title}"${pr ? ` (PR #${pr.number})` : ''}`);
   } catch (e) {
     // addTaskComment is synchronous: this line was `.catch(() => {})`, which threw
     // a TypeError and took down the worker before retry handling could run.

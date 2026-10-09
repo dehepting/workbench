@@ -122,6 +122,71 @@ export async function issueState(token, repo, number) {
   return (await res.json()).state ?? null;
 }
 
+// ---------- pull requests ----------
+//
+// These exist so an agent's work is reviewable as a diff rather than taken on
+// trust. A task in `review` should mean "there is a PR open", not "a comment
+// was posted".
+
+export async function createPullRequest(token, repo, { title, body, head, base = 'main' }) {
+  const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+    method: 'POST',
+    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, body, head, base }),
+  });
+  if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return res.json(); // { number, html_url, mergeable, state, ... }
+}
+
+// Merge state is a three-way answer, not a boolean. Callers need to tell
+// "merged" from "closed without merging" from "GitHub has not computed
+// mergeability yet", because only the first is success.
+export async function getPullRequest(token, repo, number) {
+  const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
+    headers: authHeaders(token),
+  });
+  if (!res.ok) return null;
+  const pr = await res.json();
+  return {
+    number: pr.number,
+    state: pr.state,               // 'open' | 'closed'
+    merged: !!pr.merged,           // true only once the merge actually landed
+    mergeable: pr.mergeable,       // true | false | null (still computing)
+    title: pr.title,
+    url: pr.html_url,
+    head: pr.head?.ref,
+    base: pr.base?.ref,
+  };
+}
+
+export async function mergePullRequest(token, repo, number, { method = 'squash' } = {}) {
+  const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}/merge`, {
+    method: 'PUT',
+    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ merge_method: method }),
+  });
+  // 405 means the PR is not mergeable (conflicts, checks pending). Throwing the
+  // raw body loses which of those it was, so name them.
+  if (!res.ok) {
+    const text = await res.text();
+    if (res.status === 405) {
+      throw new Error(`${repo}#${number} is not mergeable — ${text.slice(0, 200)}`);
+    }
+    throw new Error(`GitHub ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json(); // { merged: true, sha, message }
+}
+
+export async function closePullRequest(token, repo, number) {
+  const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
+    method: 'PATCH',
+    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state: 'closed' }),
+  });
+  if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
 async function paged(token, url) {
   // Pull every page rather than silently returning the first 30 — an import
   // that drops issues past page one is worse than one that says "too many".
