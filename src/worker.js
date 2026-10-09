@@ -36,7 +36,9 @@ export function buildPrompt(task, deps = '') {
       ? `\n## Depends on (already completed)\n${deps}`
       : `\nDepends on (already completed): ${task.deps.join(', ')}`);
   }
-  parts.push('\n\nAcceptance: the work described above is complete. Report exactly what you did.');
+  parts.push('\n\nAcceptance: the work described above is complete. Your final message must contain '
+    + 'the deliverable itself — do not describe a file or document you did not actually write. '
+    + 'Report exactly what you did.');
   return parts.join('\n');
 }
 

@@ -82,6 +82,13 @@ test('shellCommand wraps the template and redirects stdin', () => {
   assert.equal(shellCommand('echo hi', 'p'), "(echo hi) < /dev/null");
 });
 
+test('acceptance demands the deliverable itself, not a description of one', () => {
+  const prompt = buildPrompt({ title: 'Anything' });
+  assert.match(prompt, /final message must contain the deliverable itself/i);
+  assert.match(prompt, /did not actually write/i);
+  assert.match(prompt, /Report exactly what you did/);
+});
+
 test('buildPrompt assembles a task into an agent prompt', () => {
   const prompt = buildPrompt({
     title: 'Ship the thing',
