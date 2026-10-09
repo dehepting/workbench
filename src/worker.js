@@ -6,11 +6,36 @@ import { complete } from './model.js';
 const execFileP = promisify(execFile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export function buildPrompt(task) {
+// How much of a dependency's recorded output to feed the next task.
+const DEP_OUTPUT_LIMIT = 4000;
+
+// A chained follow-up used to see only "Depends on: t_abc123" — a bare id that
+// tells the agent nothing, so it came back with clarifying questions and the
+// worker still marked it done. Pull the dependency's actual result instead.
+export function depContext(db, ids, { limit = DEP_OUTPUT_LIMIT } = {}) {
+  return ids.map((id) => {
+    let t;
+    try { t = board.getTask(db, id); } catch { return `### Dependency ${id}\n(the task no longer exists)`; }
+    const comments = board.listComments(db, id);
+    const completed = [...comments].reverse().find((c) => c.body.startsWith('completed:'));
+    const output = completed ? completed.body.replace(/^completed:\s*/, '') : '(no output was recorded)';
+    const trimmed = output.length > limit
+      ? `${output.slice(0, limit)}\n…[truncated, ${output.length - limit} more chars]`
+      : output;
+    return `### ${t.title} (${t.id}, now ${t.column_name})\n`
+      + `${t.description ? `${t.description}\n\n` : ''}${trimmed}`;
+  }).join('\n\n');
+}
+
+export function buildPrompt(task, deps = '') {
   const parts = [`Task: ${task.title}`];
   if (task.description) parts.push(`\nDescription:\n${task.description}`);
   if (task.labels?.length) parts.push(`\nLabels: ${task.labels.join(', ')}`);
-  if (task.deps?.length) parts.push(`\nDepends on (already completed): ${task.deps.join(', ')}`);
+  if (task.deps?.length) {
+    parts.push(deps
+      ? `\n## Depends on (already completed)\n${deps}`
+      : `\nDepends on (already completed): ${task.deps.join(', ')}`);
+  }
   parts.push('\n\nAcceptance: the work described above is complete. Report exactly what you did.');
   return parts.join('\n');
 }
@@ -42,11 +67,12 @@ export function shellCommand(template, prompt) {
   return `(${substitutePrompt(template, prompt)}) < /dev/null`;
 }
 
-export async function runExec(template, prompt) {
+export async function runExec(template, prompt, { cwd = process.env.WORKBENCH_WORKER_CWD || undefined } = {}) {
   const shellCmd = shellCommand(template, prompt);
   const { stdout, stderr } = await execFileP('/bin/sh', ['-lc', shellCmd], {
     maxBuffer: 10 * 1024 * 1024,
     timeout: 30 * 60 * 1000, // 30 min hard cap
+    cwd, // exec agents complained "the working directory is empty" otherwise
   });
   return (stdout + (stderr ? `\n[stderr]\n${stderr}` : '')).trim() || '(no output)';
 }
@@ -54,9 +80,12 @@ export async function runExec(template, prompt) {
 // One pull → work → advance cycle. Exported so the failure path is testable:
 // it used to crash the whole worker, which meant auto-retry never ran.
 // Returns the task it worked on, or null when the queue is empty.
-export async function runOnce(db, agent, { exec = null, leaseMinutes = 30 } = {}) {
+export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd = undefined } = {}) {
   const task = board.nextTask(db, agent, { minutes: leaseMinutes });
   if (!task || task.empty) return null;
+
+  // Hand the agent its predecessors' actual results, not bare task ids.
+  const deps = task.deps?.length ? depContext(db, task.deps) : '';
 
   // Keep the lease alive while working, so a long task isn't re-claimed mid-flight.
   const renew = setInterval(() => {
@@ -69,9 +98,9 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30 } = {}
 
     let output;
     if (exec) {
-      output = await runExec(exec, buildPrompt(task));
+      output = await runExec(exec, buildPrompt(task, deps), { cwd });
     } else {
-      const r = await complete(db, { prompt: buildPrompt(task), agent, task_id: task.id });
+      const r = await complete(db, { prompt: buildPrompt(task, deps), agent, task_id: task.id });
       output = `${r.text}\n\n(model: ${r.model} via ${r.provider} — ${r.tokens_in}in/${r.tokens_out}out tokens, est. $${r.cost})`;
     }
 
@@ -98,13 +127,14 @@ export async function startWorker(db, {
   pollMs = +(process.env.WORKBENCH_POLL_MS || 4000),
   leaseMinutes = 30,
   exec = process.env.WORKBENCH_WORKER_EXEC || null,
+  cwd = process.env.WORKBENCH_WORKER_CWD || undefined,
 } = {}) {
-  console.log(`worker "${agent}" started — exec: ${exec ? exec : 'pooled LLM (free:smart)'}`);
+  console.log(`worker "${agent}" started — exec: ${exec ? exec : 'pooled LLM (free:smart)'}${cwd ? ` (cwd: ${cwd})` : ''}`);
 
   while (true) {
     let worked = null;
     try {
-      worked = await runOnce(db, agent, { exec, leaseMinutes });
+      worked = await runOnce(db, agent, { exec, leaseMinutes, cwd });
     } catch (e) {
       // A failed pull must not escape — that would kill the loop for good.
       console.error(`[${agent}] pull failed: ${e.message}`);

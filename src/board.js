@@ -235,6 +235,9 @@ export function moveTask(db, id, to, { actor = 'system', force = false } = {}) {
       assignee: t.assignee,
       priority: t.priority,
       deps: [id],
+      // A follow-up invented by the workflow should be checked like the work
+      // that spawned it — otherwise a worker's output lands in done unreviewed.
+      requires_review: t.requires_review,
     }, 'system');
     addSystemComment(db, id, `Chained follow-up created: ${chained.id} "${chained.title}"`);
   }

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../src/store.js';
 import * as board from '../src/board.js';
-import { runOnce } from '../src/worker.js';
+import { runOnce, depContext, buildPrompt } from '../src/worker.js';
 
 let dataDir, db, projectId;
 
@@ -85,6 +85,52 @@ test('requires_review tasks stop in review, not done', async () => {
   await runOnce(db, 'tester', { exec: 'echo looks good' });
 
   assert.equal(board.getTask(db, t.id).column_name, 'review');
+});
+
+test('a chained task gets its dependency output, not a bare id', async () => {
+  makeTask({ title: 'Research the thing', next_task_title: 'Summarize the research' });
+  await runOnce(db, 'tester', { exec: 'echo "KEY FINDING: Groq wins"' });
+
+  const chained = board.listTasks(db).find((t) => t.title === 'Summarize the research');
+  assert.ok(chained, 'follow-up should have been created');
+  assert.equal(chained.requires_review, false, 'parent did not require review');
+
+  // Echo the prompt back so we can assert what the agent would have seen.
+  await runOnce(db, 'tester', { exec: 'printf %s {prompt}' });
+
+  const completion = board.listComments(db, chained.id).find((c) => c.body.startsWith('completed:'));
+  assert.ok(completion, 'chained task should have been worked');
+  assert.match(completion.body, /## Depends on \(already completed\)/);
+  assert.match(completion.body, /KEY FINDING: Groq wins/, 'the predecessor result must reach the agent');
+  assert.match(completion.body, /### Research the thing/, 'and be labelled with its source task');
+  assert.doesNotMatch(completion.body, /Depends on \(already completed\): t_/,
+    'a bare task id is not context');
+});
+
+test('a dependency with no recorded output says so instead of inventing context', async () => {
+  const dep = makeTask({ title: 'Silent predecessor' });
+  board.moveTask(db, dep.id, 'done', { actor: 'test' });
+  const t = makeTask({ title: 'Dependent', deps: [dep.id] });
+
+  await runOnce(db, 'tester', { exec: 'printf %s {prompt}' });
+
+  const completion = board.listComments(db, t.id).find((c) => c.body.startsWith('completed:'));
+  assert.match(completion.body, /no output was recorded/);
+});
+
+test('a vanished dependency does not break the prompt', () => {
+  // Unreachable through the API (deleteTask refuses while dependents exist),
+  // but depContext should stay defensive rather than throw.
+  const ghost = makeTask({ title: 'Ghost' });
+  board.moveTask(db, ghost.id, 'done', { actor: 'test' });
+  db.prepare('DELETE FROM tasks WHERE id = ?').run(ghost.id);
+
+  assert.match(depContext(db, [ghost.id]), /no longer exists/);
+  // Build the prompt from a literal task object: createTask rightly refuses
+  // to attach a dependency that no longer exists.
+  const prompt = buildPrompt({ title: 'T', deps: [ghost.id] }, depContext(db, [ghost.id]));
+  assert.match(prompt, /## Depends on \(already completed\)/);
+  assert.match(prompt, /no longer exists/);
 });
 
 test('the prompt the agent receives includes the task context', async () => {

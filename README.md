@@ -63,6 +63,12 @@ The worker: `wb_next_task` → comment "picked up" → move to `doing` → execu
 comment output → move to `review` (if `requires_review`) or `done` → on failure,
 move to `failed` (auto-retry applies). Leases auto-renew every 60s while working.
 
+Prompts carry real context: each dependency's title, description and recorded
+`completed:` output is inlined (a bare task id tells an agent nothing), and a
+chained follow-up inherits `requires_review` from the task that spawned it.
+Set `WORKBENCH_WORKER_CWD` to give exec agents a workspace instead of the
+directory the worker was started in.
+
 ## GitHub sync
 
 Tasks and GitHub issues stay in lockstep. Auth uses your existing
@@ -177,6 +183,7 @@ await wb('wb_record_run', { agent: 'coder-1', model: 'groq/llama-3.3-70b', token
 | `WORKBENCH_WEBHOOK_URL` | — | outbound webhook on events |
 | `WORKBENCH_WEBHOOK_SECRET` | — | HMAC-SHA256 signing secret (`X-Workbench-Signature`) |
 | `WORKBENCH_WORKER_EXEC` | — | worker command template (`{prompt}` placeholder) |
+| `WORKBENCH_WORKER_CWD` | inherit | working directory for exec workers |
 | `WORKBENCH_AGENT` | `worker-1` | default worker agent name |
 | `WORKBENCH_POLL_MS` | `4000` | worker idle poll interval |
 

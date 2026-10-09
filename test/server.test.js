@@ -201,15 +201,23 @@ test('nextTask hands each task to exactly one agent', async () => {
   assert.deepEqual(third.json, { empty: true }, 'queue is drained');
 });
 
-test('completing a task chains a follow-up', async () => {
-  const t = await newTask({ title: 'Original', next_task_title: 'Follow-up work' });
+test('completing a task chains a follow-up that inherits the review gate', async () => {
+  const t = await newTask({ title: 'Original', next_task_title: 'Follow-up work', requires_review: true });
 
+  const direct = await post(`/api/tasks/${t.id}/move`, { column: 'done' });
+  assert.equal(direct.status, 409, 'parent must pass review first');
+  await post(`/api/tasks/${t.id}/move`, { column: 'review' });
   await post(`/api/tasks/${t.id}/move`, { column: 'done' });
 
   const tasks = await call(`/api/tasks?project_id=${project.id}`);
   const chained = tasks.json.find((x) => x.title === 'Follow-up work');
   assert.ok(chained, 'chained task should be created');
   assert.deepEqual(chained.deps, [t.id]);
+  assert.equal(chained.requires_review, true,
+    'a workflow-invented follow-up must be checked like the work that spawned it');
+
+  const skipped = await post(`/api/tasks/${chained.id}/move`, { column: 'done' });
+  assert.equal(skipped.status, 409, 'the inherited gate must actually hold');
 });
 
 test('tasks with dependents cannot be deleted', async () => {
