@@ -272,3 +272,176 @@ test('overlapping ticks do not double-import', async () => {
 
   assert.equal(board.listTasks(db, { project_id: projectId() }).length, 1, 'one issue, one task');
 });
+
+// Regression: the push pass once inferred "the card was reopened" from a state
+// snapshot of "card not in done + issue closed". Both directions look identical
+// in a snapshot, so the first time someone closed an issue on GitHub the push
+// pass reopened it, undoing their close and hiding the card's completion.
+test('pushing cards must not reopen an issue that was closed on GitHub', async () => {
+  bind();
+  const t = board.createTask(db, { project_id: projectId(), title: 'Mirrored work' });
+  board.linkGithub(db, t.id, 'dehepting/workbench', 5, 'http://x/5');
+  issues = [makeIssue(5, { state: 'closed' })];
+
+  await sync.syncProject(db, projectId());
+
+  const reopened = calls.filter((c) => c.method === 'PATCH' && c.body?.state === 'open');
+  assert.equal(reopened.length, 0, 'a GitHub close is the pull direction — pushing must not fight it');
+  assert.equal(board.getTask(db, t.id).column_name, 'done', 'the closed issue still completes its card');
+});
+
+// The mirror writes (close/reopen issue) are fired without awaiting, because a
+// board move must not block on GitHub. Waiting a fixed time races the gh child
+// process getToken() spawns, and a test that asserts too early passes for the
+// wrong reason — it proves nothing, it just fails to observe the write. So wait
+// for the observable effect instead, and fail loudly if it never arrives.
+async function waitFor(predicate, { timeoutMs = 3000, what = 'condition' } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const v = predicate();
+    if (v) return v;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+test('a card leaving done reopens its issue', async () => {
+  bind();
+  const t = board.createTask(db, { project_id: projectId(), title: 'Finished then revived' });
+  board.linkGithub(db, t.id, 'dehepting/workbench', 6, 'http://x/6');
+  board.moveTask(db, t.id, 'done', { actor: 'david' });
+  // moveTask fires closeMirrorIssue without awaiting. If that close is still in
+  // flight when calls is reset below, its own PATCH lands mid-test and gets
+  // misread as the reopen. Settle it first.
+  await waitFor(() => calls.some((c) => c.method === 'PATCH' && c.body?.state === 'closed'),
+    { what: 'the setup close to settle' });
+
+  // The issue is closed on GitHub; the card is what moves.
+  calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null });
+    if (opts.method === 'PATCH') return ok({ state: 'open' });
+    if (String(url).includes('/issues/6')) return ok({ state: 'closed' });
+    return ok({});
+  };
+
+  board.moveTask(db, t.id, 'todo', { actor: 'david', force: true });
+
+  const reopen = await waitFor(
+    () => calls.find((c) => c.method === 'PATCH' && c.body?.state === 'open'),
+    { what: 'the reopen PATCH' },
+  );
+  assert.match(String(reopen.url), /\/issues\/6$/, 'and reopens the right one');
+});
+
+test('leaving done does not touch an issue that is already open', async () => {
+  bind();
+  const t = board.createTask(db, { project_id: projectId(), title: 'Never closed' });
+  board.linkGithub(db, t.id, 'dehepting/workbench', 7, 'http://x/7');
+  board.moveTask(db, t.id, 'done', { actor: 'david' });
+  // Same settling as above — without it the setup's own close PATCH is counted
+  // as a write caused by leaving done, which is a false failure.
+  await waitFor(() => calls.some((c) => c.method === 'PATCH' && c.body?.state === 'closed'),
+    { what: 'the setup close to settle' });
+
+  calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null });
+    if (String(url).includes('/issues/7')) return ok({ state: 'open' });
+    return ok({});
+  };
+
+  board.moveTask(db, t.id, 'todo', { actor: 'david', force: true });
+
+  // Wait for the read that decides, then assert nothing was written. Asserting
+  // "no PATCH" before the decision was even made would pass no matter what.
+  await waitFor(() => calls.some((c) => c.method === 'GET' && String(c.url).includes('/issues/7')),
+    { what: 'the issueState read' });
+  await new Promise((r) => setTimeout(r, 50)); // give a wrong write time to land
+
+  assert.equal(calls.filter((c) => c.method === 'PATCH').length, 0,
+    'no write when the issue was never closed');
+});
+
+test('pushTasksToGithub raises an issue per card and links it', async () => {
+  bind();
+  const a = board.createTask(db, { project_id: projectId(), title: 'Card A', description: 'Desc A', labels: ['engineering'] });
+  board.createTask(db, { project_id: projectId(), title: 'Card B' });
+
+  // createIssue returns whatever GitHub echoes; the mock echoes the body.
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null });
+    if (opts.method === 'POST' && String(url).includes('/issues')) {
+      const b = opts.body ? JSON.parse(opts.body) : {};
+      return ok({ number: 42, html_url: 'http://x/42', title: b.title });
+    }
+    return ok({});
+  };
+  calls = [];
+
+  const r = await board.pushTasksToGithub(db, projectId());
+
+  assert.equal(r.created.length, 2, 'backlog cards are included, not just committed work');
+  const post = calls.find((c) => c.method === 'POST' && String(c.url).includes('/issues'));
+  assert.equal(post.body.title, 'Card A');
+  assert.match(post.body.body, new RegExp(a.id), 'the task id is in the body, so importIssues can adopt it back');
+  assert.deepEqual(post.body.labels, ['engineering'], 'labels carry across');
+  assert.equal(board.getTask(db, a.id).meta.github.number, 42, 'the card is anchored to its issue');
+});
+
+test('already-mirrored cards are not re-issued', async () => {
+  bind();
+  const t = board.createTask(db, { project_id: projectId(), title: 'Already out there' });
+  board.linkGithub(db, t.id, 'dehepting/workbench', 9, 'http://x/9');
+
+  calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null });
+    return ok({});
+  };
+
+  const r = await board.pushTasksToGithub(db, projectId());
+
+  assert.equal(r.created.length, 0, 'idempotent — a second pass creates nothing');
+  assert.equal(calls.filter((c) => c.method === 'POST').length, 0);
+});
+
+test('done and failed cards get no retroactive issue', async () => {
+  bind();
+  const done = board.createTask(db, { project_id: projectId(), title: 'Long finished' });
+  board.moveTask(db, done.id, 'done', { actor: 'david' });
+
+  calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null });
+    return ok({});
+  };
+
+  const r = await board.pushTasksToGithub(db, projectId());
+
+  assert.equal(r.created.length, 0, 'an issue opened now would only be closed again — noise, not history');
+  assert.equal(r.skipped.length, 1);
+  assert.equal(r.skipped[0].task_id, done.id);
+});
+
+test('a deleted card closes its mirror issue', async () => {
+  bind();
+  const t = board.createTask(db, { project_id: projectId(), title: 'Doomed' });
+  board.linkGithub(db, t.id, 'dehepting/workbench', 11, 'http://x/11');
+
+  calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null });
+    return ok({});
+  };
+
+  const r = board.deleteTask(db, t.id, 'david');
+  await r.github_close;
+
+  const close = calls.find((c) => c.method === 'PATCH' && c.body?.state === 'closed');
+  assert.ok(close, 'the orphan issue is closed, not left claiming work that is gone');
+  const comment = calls.find((c) => c.method === 'POST' && String(c.url).includes('/comments'));
+  // calls stores the parsed body, so the text is nested one level down.
+  assert.match(comment?.body?.body || '', /card was deleted/, 'and says why');
+});
+

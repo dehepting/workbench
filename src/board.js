@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { emit } from './bus.js';
 import { PRICES, DEFAULT_PRICE } from './providers.js';
-import { getToken, commentIssue, closeIssue } from './github.js';
+import { getToken, commentIssue, closeIssue, createIssue, reopenIssue, issueState } from './github.js';
 
 export const COLUMNS = ['backlog', 'todo', 'doing', 'review', 'done', 'failed'];
 
@@ -272,6 +272,14 @@ export function moveTask(db, id, to, { actor = 'system', force = false } = {}) {
   // or fail because of, GitHub's availability.
   if (to === 'done' && t.column_name !== 'done') closeMirrorIssue(db, id, actor);
 
+  // The mirror image, on the same event. Must key off `from === 'done'` rather
+  // than "the card isn't in done now": only a card actually leaving done should
+  // reopen anything. Inferring it from current state made a sync pass see
+  // "backlog + closed issue" after someone closed an issue on GitHub, read it
+  // as a reopen, and undo their close — which is how a live card's issue got
+  // silently reopened.
+  if (t.column_name === 'done' && to !== 'done') reopenMirrorIssue(db, id, t.column_name, actor);
+
   // Chaining: completing a task can auto-create a follow-up
   if (to === 'done' && t.next_task_title) {
     const chained = createTask(db, {
@@ -294,11 +302,41 @@ export function deleteTask(db, id, actor = 'system') {
   const t = getTask(db, id);
   const dependents = db.prepare('SELECT id FROM tasks WHERE id != ? AND deps LIKE ?').all(id, `%${id}%`);
   if (dependents.length) fail('blocked', `Other tasks depend on it: ${dependents.map(d => d.id).join(', ')}`);
+
+  // The close is started before the row is deleted so a caller that can await
+  // it (the HTTP route) shrinks the window where the issue is still open — long
+  // enough for a concurrent sync tick to re-import it as a brand-new card and
+  // resurrect work that was just removed. Callers that don't await get
+  // fire-and-forget, which is still correct, just eventual.
+  const gh = t.meta?.github;
+  const closing = gh?.repo && gh?.number
+    ? closeOrphanIssue(db, gh, id, t.title, actor)
+    : Promise.resolve();
+
   db.prepare('DELETE FROM comments WHERE task_id = ?').run(id);
   db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
   audit(db, actor, 'task.delete', id, t.project_id, t.title);
   emit('task.delete', { id, project_id: t.project_id, actor });
-  return { deleted: id };
+
+  return { deleted: id, github_close: closing };
+}
+
+// A card was deleted but its issue is still on GitHub claiming work exists.
+// Closing it keeps the repo a truthful picture of the board; commenting first
+// means anyone watching the issue learns why it stopped rather than guessing.
+async function closeOrphanIssue(db, gh, taskId, title, actor) {
+  try {
+    const token = await getToken();
+    if (!token) return; // nothing to say, and nothing that can be done about it
+    await commentIssue(token, gh.repo, gh.number,
+      `Closed because its Workbench card was deleted (\`${taskId}\` — ${title}).`);
+    await closeIssue(token, gh.repo, gh.number);
+    audit(db, actor, 'task.github_close_orphan', taskId, null, `${gh.repo}#${gh.number}`);
+  } catch {
+    // Best-effort by design. An unreachable GitHub leaves an open issue that a
+    // later sync can reconcile; failing the delete would leave a card the user
+    // already decided to remove.
+  }
 }
 
 // ---------- claiming (leases) ----------
@@ -476,6 +514,81 @@ function taskExists(db, id) {
   return !!db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(id);
 }
 
+// The other direction: board cards become GitHub issues.
+//
+// Sync was pull-only, which meant a project planned entirely on the board had
+// an empty repo — nothing was trackable outside the board, and the link only
+// existed if someone raised each issue by hand. Every card in a bound project
+// gets an issue now, backlog included: the board is where work is planned, but
+// the repo is where it is visible to everyone and everything else.
+//
+// Idempotency rests on two independent anchors, because either can be lost:
+//   - meta.github, written by linkGithub, is the fast path;
+//   - the task id in the issue body, which importIssues already adopts.
+// So a card whose meta was wiped re-links instead of duplicating, and a repo
+// issue raised by hand on a card that already exists is adopted, not re-created.
+export async function pushTasksToGithub(db, projectId, { actor = 'github' } = {}) {
+  const project = getProject(db, projectId);
+  const repo = project.repo;
+  if (!repo) return { skipped: 'project has no repo bound' };
+
+  const token = await getToken();
+  if (!token) return { skipped: 'GitHub not connected' };
+
+  const result = { created: [], linked: [], skipped: [], errors: [] };
+
+  for (const row of db.prepare('SELECT id, column_name FROM tasks WHERE project_id = ?').all(projectId)) {
+    const t = getTask(db, row.id);
+    const gh = t.meta?.github;
+
+    // Already mirrored. Deliberately does NOT overwrite the issue title or
+    // body: a human editing the issue on GitHub should not have their words
+    // reverted by the next poll. Reopening is NOT handled here either — see
+    // moveTask, which fires it off the event rather than a state snapshot.
+    if (gh?.repo && gh?.number) continue;
+
+    // Done or failed work that was never mirrored gets no retroactive issue:
+    // an issue created now would only be closed on the next line, which is
+    // noise in the repo rather than history. Its record lives on the board.
+    if (t.column_name === 'done' || t.column_name === 'failed') {
+      result.skipped.push({ task_id: t.id, reason: `already ${t.column_name}, no issue created` });
+      continue;
+    }
+
+    try {
+      const issue = await createIssue(token, repo, {
+        title: t.title,
+        // The task id in the body is load-bearing, not decoration: it is what
+        // lets importIssues adopt this issue back onto the card if the meta
+        // anchor is ever lost.
+        body: issueBody(t, repo),
+        labels: t.labels || [],
+      });
+      linkGithub(db, t.id, repo, issue.number, issue.html_url);
+      result.created.push({ task_id: t.id, number: issue.number, url: issue.html_url });
+    } catch (e) {
+      // One failure (a label that 422s, a rate limit) must not abandon the rest
+      // of the project's cards.
+      result.errors.push({ task_id: t.id, error: e.message });
+    }
+  }
+
+  audit(db, actor, 'github.push', project.id, project.id,
+    `${repo}: +${result.created.length} skipped ${result.skipped.length} errors ${result.errors.length}`);
+  return { repo, ...result };
+}
+
+// Issue body for a board card. Kept in one place so the API's manual
+// link route and this path produce issues importIssues can equally adopt.
+export function issueBody(t, repo) {
+  return [
+    t.description || '',
+    '',
+    `---`,
+    `_Workbench task \`${t.id}\`${repo ? ` — ${repo}` : ''} · http://localhost:4173/tasks/${t.id}_`,
+  ].join('\n');
+}
+
 // Push new task comments onto the linked issue, so the repo shows what the
 // agents actually did without anyone copying it over. Which comments have gone
 // out is tracked in the task's meta (pushed_ids) rather than a comments.meta
@@ -567,6 +680,45 @@ export async function closeMirrorIssue(db, taskId, actor = 'system') {
     return { closed: `${gh.repo}#${gh.number}` };
   } catch (e) {
     addSystemComment(db, taskId, `Done, but could not close ${gh.repo}#${gh.number}: ${e.message}`);
+    return { error: e.message };
+  }
+}
+
+// The other half of closeMirrorIssue: a card that leaves done is live work
+// again, so its issue reopens.
+//
+// Fired from moveTask off the event itself, for the same reason closing is —
+// and specifically because inferring this from a state snapshot is wrong. A
+// sync pass that sees "card not in done, issue closed" cannot tell a human
+// reopening the card apart from GitHub closing the issue; the first time it
+// guesses wrong it silently undoes a close someone made on GitHub. Anchoring
+// on `from === 'done'` means the only thing that can reopen an issue is a card
+// actually leaving done.
+export async function reopenMirrorIssue(db, taskId, from, actor = 'system') {
+  const t = getTask(db, taskId);
+  const gh = t.meta?.github;
+  if (!gh?.repo || !gh?.number) return { skipped: 'not linked' };
+  if (from !== 'done') return { skipped: 'did not leave done' };
+  // Same guard as closeMirrorIssue: github-driven moves must not write back.
+  if (actor === 'github') return { skipped: 'actor is github' };
+
+  const token = await getToken();
+  if (!token) return { skipped: 'no token' };
+
+  try {
+    // issueState, not an unconditional reopen: a card that left done while its
+    // issue was already open must not generate a write (or a spurious event).
+    if (await issueState(token, gh.repo, gh.number) !== 'closed') return { skipped: 'issue already open' };
+    await reopenIssue(token, gh.repo, gh.number);
+    await commentIssue(token, gh.repo, gh.number, `Reopened — Workbench task \`${taskId}\` moved out of done.`);
+    audit(db, actor, 'task.github_reopen', taskId, t.project_id, `${gh.repo}#${gh.number}`);
+    emit('task.update', { id: taskId, project_id: t.project_id, actor });
+    return { reopened: `${gh.repo}#${gh.number}` };
+  } catch (e) {
+    // Non-fatal, but must be visible: if the issue stays closed the next sync
+    // will see a closed issue against a live card and push it straight back to
+    // done, which looks exactly like the move never happened.
+    addSystemComment(db, taskId, `Moved out of done, but could not reopen ${gh.repo}#${gh.number}: ${e.message}`);
     return { error: e.message };
   }
 }

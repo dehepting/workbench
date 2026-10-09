@@ -35,6 +35,17 @@ export async function syncProject(db, projectId, { actor = 'github' } = {}) {
   const token = await github.getToken();
   if (!token) return { skipped: 'GitHub not connected' };
 
+  // Push: board cards become issues, so a project planned on the board has a
+  // repo that shows it. Runs before the pull so a card created since the last
+  // pass is mirrored before importIssues gets a chance to see the fresh issue
+  // and try to adopt it back.
+  let pushed;
+  try {
+    pushed = await board.pushTasksToGithub(db, projectId, { actor });
+  } catch (e) {
+    pushed = { error: e.message };
+  }
+
   // Pull: open issues become backlog tasks, deduped on meta.github.
   const open = await github.listIssues(token, repo, { state: 'open' });
   const imported = board.importIssues(db, projectId, repo, open, { actor });
@@ -44,24 +55,25 @@ export async function syncProject(db, projectId, { actor = 'github' } = {}) {
   const reconciled = board.syncIssuesFromGithub(db, projectId, repo, [...open, ...closed], { actor });
 
   // Push: task comments land back on their issue.
-  const pushed = [];
+  const pushedComments = [];
   for (const row of db.prepare('SELECT id FROM tasks WHERE project_id = ?').all(projectId)) {
     const gh = board.getTask(db, row.id).meta?.github;
     if (!gh?.repo || !gh.number) continue;
     try {
       const r = await board.pushCommentsToIssue(db, row.id);
-      if (r.pushed) pushed.push({ task_id: row.id, count: r.pushed });
+      if (r.pushed) pushedComments.push({ task_id: row.id, count: r.pushed });
     } catch (e) {
-      pushed.push({ task_id: row.id, error: e.message });
+      pushedComments.push({ task_id: row.id, error: e.message });
     }
   }
 
   return {
     repo,
+    pushed,
     open_issues: open.length,
     imported,
     reconciled,
-    pushed,
+    pushed_comments: pushedComments,
     last_sync_at: new Date().toISOString(),
   };
 }

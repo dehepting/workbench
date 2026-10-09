@@ -110,6 +110,18 @@ export async function reopenIssue(token, repo, number) {
   return res.json();
 }
 
+// 'open' | 'closed' | null. Returns null rather than throwing when the issue
+// is gone or unreadable, because the only caller is deciding whether a reopen
+// is needed — a card whose issue was deleted by hand should not be able to
+// fail a whole sync pass.
+export async function issueState(token, repo, number) {
+  const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
+    headers: { ...authHeaders(token), Accept: 'application/vnd.github+json' },
+  });
+  if (!res.ok) return null;
+  return (await res.json()).state ?? null;
+}
+
 async function paged(token, url) {
   // Pull every page rather than silently returning the first 30 — an import
   // that drops issues past page one is worse than one that says "too many".

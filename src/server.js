@@ -118,7 +118,15 @@ export function startServer(db) {
         const sub = taskMatch[2];
         if (!sub && m('GET')) return send(res, 200, board.getTask(db, id));
         if (!sub && m('PATCH')) return send(res, 200, board.updateTask(db, id, body, body.actor || 'api'));
-        if (!sub && m('DELETE')) return send(res, 200, board.deleteTask(db, id, body.actor || 'api'));
+        if (!sub && m('DELETE')) {
+          // Await the mirror-issue close before responding: the delete already
+          // happened, but a caller that knows the close finished can safely run
+          // a sync next without racing a re-import of the now-orphaned issue.
+          const r = board.deleteTask(db, id, body.actor || 'api');
+          if (r.github_close) await r.github_close;
+          const { github_close, ...rest } = r;
+          return send(res, 200, rest);
+        }
         if (sub === 'move' && m('POST')) return send(res, 200, board.moveTask(db, id, body.column, { actor: body.actor || 'api', force: !!body.force }));
         if (sub === 'claim' && m('POST')) return send(res, 200, board.claimTask(db, id, body.agent, body.minutes ?? 10));
         if (sub === 'release' && m('POST')) return send(res, 200, board.releaseTask(db, id, body.agent));
