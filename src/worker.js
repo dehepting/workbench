@@ -175,6 +175,10 @@ export async function openPullRequest(project, task, work, output) {
     `_Workbench task \`${task.id}\` — ${project.repo} — ${project.name || ''}_`,
   ].join('\n');
 
+  // The branch exists only locally until we push it. GitHub will reject the
+  // PR (422 `head` invalid) if the ref isn't visible on origin.
+  await git.pushBranch(work.dir, git.branchFor(task.id), { token });
+
   const pr = await github.createPullRequest(token, project.repo, {
     title: task.title,
     body,
