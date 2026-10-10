@@ -1,5 +1,6 @@
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useLedger, useStats, useTasks } from '../hooks/useStats';
+import { ProvidersCard } from './ProvidersCard';
 
 const COLUMNS = ['backlog', 'todo', 'doing', 'review', 'done', 'failed'];
 const COLUMN_LABELS: Record<string, string> = {
@@ -100,21 +101,25 @@ export function OverviewTab() {
         </div>
       </div>
 
-      {/* Labels */}
-      {Object.keys(byLabel).length > 0 && (
-        <div className="card">
-          <h3>Tasks by Label</h3>
-          <div className="label-cloud">
-            {Object.entries(byLabel)
-              .sort((a, b) => b[1] - a[1])
-              .map(([label, count]) => (
-                <span key={label} className="label-tag">
-                  {label} ({count})
-                </span>
-              ))}
+      {/* Providers and Labels */}
+      <div className="content-grid">
+        <ProvidersCard />
+
+        {Object.keys(byLabel).length > 0 && (
+          <div className="card">
+            <h3>Tasks by Label</h3>
+            <div className="label-cloud">
+              {Object.entries(byLabel)
+                .sort((a, b) => b[1] - a[1])
+                .map(([label, count]) => (
+                  <span key={label} className="label-tag">
+                    {label} ({count})
+                  </span>
+                ))}
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

@@ -6,8 +6,8 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: tests (node ${{ matrix.node }})
+  backend-test:
+    name: backend tests (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -22,6 +22,27 @@ jobs:
           node-version: ${{ matrix.node }}
       # zero dependencies — no install step
       - run: npm test
+
+  frontend-test:
+    name: frontend tests & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+      - name: Run frontend tests
+        working-directory: ./frontend
+        run: npm test -- --run
+      - name: Build frontend
+        working-directory: ./frontend
+        run: npm run build
+      - name: Lint frontend
+        working-directory: ./frontend
+        run: npm run lint
 
   menu-bar-app:
     name: menu bar app compiles

@@ -1062,3 +1062,69 @@ button.primary {
 .unconfigured-notice small {
   font-size: 11px;
 }
+
+/* Interactive Task Modal */
+.task-modal-large {
+  max-width: 700px;
+}
+
+.task-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  background: var(--panel);
+  border-radius: 6px;
+}
+
+.move-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.move-button {
+  font-size: 12px;
+  padding: 6px 12px;
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.move-button:hover {
+  opacity: 0.9;
+}
+
+.delete-button {
+  color: var(--red);
+  border-color: var(--red);
+  background: rgba(248, 81, 73, 0.1);
+}
+
+.delete-button:hover {
+  background: rgba(248, 81, 73, 0.2);
+}
+
+.comments-section {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--panel);
+  border-radius: 6px;
+}
+
+.comment-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.comment-input-row input {
+  flex: 1;
+}
+
+.comments-placeholder {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+  padding: 20px;
+}
