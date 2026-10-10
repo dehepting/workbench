@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { OverviewTab } from './components/OverviewTab';
 import { LiveTab } from './components/LiveTab';
 import { BoardTab } from './components/BoardTab';
+import { NewTaskModal } from './components/NewTaskModal';
 import './App.css';
 
 // Create a client
@@ -22,6 +23,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<Tab>(
     (localStorage.getItem('wb_tab') as Tab) || 'board'
   );
+  const [showNewTaskModal, setShowNewTaskModal] = useState(false);
 
   const handleTabChange = (tab: Tab) => {
     setActiveTab(tab);
@@ -35,7 +37,9 @@ function App() {
           <h1>
             Work<span>bench</span>
           </h1>
-          <button className="primary">+ New task</button>
+          <button className="primary" onClick={() => setShowNewTaskModal(true)}>
+            + New task
+          </button>
         </header>
 
         <nav className="tabs">
@@ -71,6 +75,10 @@ function App() {
           {activeTab === 'live' && <LiveTab />}
           {activeTab === 'debug' && <DebugTab />}
         </main>
+
+        {showNewTaskModal && (
+          <NewTaskModal onClose={() => setShowNewTaskModal(false)} />
+        )}
       </div>
     </QueryClientProvider>
   );
