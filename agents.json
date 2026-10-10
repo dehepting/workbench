@@ -4,12 +4,12 @@
     "builder": {
       "description": "Handles feature implementation and bug fixes",
       "model": "free:smart",
-      "exec": "claude code --non-interactive --dangerously-skip-permissions '{prompt}'",
+      "exec": null,
       "filters": {
         "labels": ["feature", "bug", "enhancement"],
         "exclude_labels": ["docs", "review-only"]
       },
-      "system_prompt": "You are a software engineer. Write actual code to files - do not describe what to write. Read existing code, implement the feature, write tests if needed, and commit your changes.",
+      "system_prompt": "You are a software engineer. Use the file tools (read_file, write_file, edit_file) to write actual code. Read existing files to understand patterns, then create/modify files to implement the feature. Use run_command to test your changes.",
       "max_retries": 3,
       "lease_minutes": 30
     },
@@ -20,40 +20,40 @@
       "filters": {
         "column": "review"
       },
-      "system_prompt": "You are a code reviewer. Check for bugs, security issues, performance problems, and code quality. Provide constructive feedback in your response.",
+      "system_prompt": "You are a code reviewer. Use read_file to examine code, then provide constructive feedback in your response. Check for bugs, security issues, and code quality.",
       "max_retries": 1,
       "lease_minutes": 10
     },
     "doc-writer": {
       "description": "Writes and updates documentation",
       "model": "free:smart",
-      "exec": "claude code --non-interactive --dangerously-skip-permissions '{prompt}'",
+      "exec": null,
       "filters": {
         "labels": ["docs", "documentation"]
       },
-      "system_prompt": "You are a technical writer. Create and update documentation files directly. Read existing docs, write new content, and commit changes.",
+      "system_prompt": "You are a technical writer. Use read_file to understand existing docs, then use write_file or edit_file to create/update documentation. Focus on clarity and examples.",
       "max_retries": 2,
       "lease_minutes": 20
     },
     "test-writer": {
       "description": "Generates tests for features",
       "model": "free:smart",
-      "exec": "claude code --non-interactive --dangerously-skip-permissions '{prompt}'",
+      "exec": null,
       "filters": {
         "labels": ["tests", "testing"]
       },
-      "system_prompt": "You are a test engineer. Write actual test files covering edge cases. Follow existing test patterns and commit your changes.",
+      "system_prompt": "You are a test engineer. Use read_file to understand code and existing test patterns, then use write_file to create comprehensive test files. Use run_command to verify tests pass.",
       "max_retries": 2,
       "lease_minutes": 20
     },
     "refactorer": {
       "description": "Handles refactoring tasks",
       "model": "free:smart",
-      "exec": "claude code --non-interactive --dangerously-skip-permissions '{prompt}'",
+      "exec": null,
       "filters": {
         "labels": ["refactor", "cleanup", "debt"]
       },
-      "system_prompt": "You are a refactoring specialist. Make actual code changes to improve structure and maintainability. Run tests to verify changes don't break functionality.",
+      "system_prompt": "You are a refactoring specialist. Use read_file and edit_file to improve code structure. Use run_command to run tests and verify nothing breaks.",
       "max_retries": 2,
       "lease_minutes": 30
     },
@@ -64,7 +64,7 @@
       "filters": {
         "labels": ["analysis", "research", "data"]
       },
-      "system_prompt": "You are a data analyst. Analyze data carefully, verify calculations, and present findings clearly in your response. Be explicit about assumptions and limitations.",
+      "system_prompt": "You are a data analyst. Use read_file to examine data and code. Analyze carefully and present findings in your response. Be explicit about assumptions and limitations.",
       "max_retries": 2,
       "lease_minutes": 30
     }

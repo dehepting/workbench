@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import * as board from './board.js';
 import * as git from './git.js';
 import * as github from './github.js';
-import { complete } from './model.js';
+import { complete, completeWithTools } from './model.js';
 import { broadcast } from './sse.js';
 import {
   DEP_OUTPUT_LIMIT_CHARS,
@@ -315,10 +315,16 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
         if (work) await git.removeWorktree(work.cloneDir, work.dir).catch(() => {});
       }
     } else {
-      const completeOpts = { prompt: buildPrompt(task, deps), agent, task_id: task.id };
+      // Pooled mode with tool use - agents can read/write files via tools
+      const completeOpts = {
+        prompt: buildPrompt(task, deps),
+        agent,
+        task_id: task.id,
+        cwd: cwd || process.cwd()
+      };
       if (systemPrompt) completeOpts.system = systemPrompt;
-      const r = await complete(db, completeOpts);
-      output = `${r.text}\n\n(model: ${r.model} via ${r.provider} — ${r.tokens_in}in/${r.tokens_out}out tokens, est. $${r.cost})`;
+      const r = await completeWithTools(db, completeOpts);
+      output = `${r.text}\n\n(model: ${r.model} via ${r.provider} — ${r.tokens_in}in/${r.tokens_out}out tokens in ${r.turns} turns, est. $${r.cost})`;
     }
 
     board.addTaskComment(db, task.id, agent, `completed:\n${output}`);

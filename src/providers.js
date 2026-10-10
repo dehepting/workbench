@@ -175,7 +175,7 @@ function estimateCost(provider, tokensIn, tokensOut) {
   return +(((tokensIn / 1e6) * pin) + ((tokensOut / 1e6) * pout)).toFixed(6);
 }
 
-export async function chat(messages, { model = 'free:smart', max_tokens = 2048, temperature = 0.7 } = {}) {
+export async function chat(messages, { model = 'free:smart', max_tokens = 2048, temperature = 0.7, tools = null } = {}) {
   const plan = resolveCandidates(model);
   if (!plan.length) {
     const anyKey = Object.values(PROVIDERS).some((p) => keyOf(p));
@@ -189,10 +189,24 @@ export async function chat(messages, { model = 'free:smart', max_tokens = 2048, 
     const modelId = cand.modelId ?? cand.models[0];
     const t0 = Date.now();
     try {
+      const body = { model: modelId, messages, max_tokens, temperature };
+
+      // Add tools if provided (OpenAI format with conversion to Anthropic format for compatibility)
+      if (tools && tools.length > 0) {
+        body.tools = tools.map(t => ({
+          type: 'function',
+          function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.input_schema
+          }
+        }));
+      }
+
       const res = await fetch(`${cand.base}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cand.apiKey}` },
-        body: JSON.stringify({ model: modelId, messages, max_tokens, temperature }),
+        body: JSON.stringify(body),
       });
 
       // Rate limits, exhausted credits, and upstream hiccups → try the next provider.
@@ -215,8 +229,11 @@ export async function chat(messages, { model = 'free:smart', max_tokens = 2048, 
       const data = await res.json();
       markOk(cand.name, Date.now() - t0);
       const usage = data.usage ?? {};
+      const message = data.choices?.[0]?.message;
+
       return {
-        text: data.choices?.[0]?.message?.content ?? '',
+        text: message?.content ?? '',
+        tool_calls: message?.tool_calls || null,
         tokens_in: usage.prompt_tokens ?? 0,
         tokens_out: usage.completion_tokens ?? 0,
         model: modelId,
