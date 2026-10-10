@@ -10,6 +10,7 @@
     "start": "node bin/workbench.js",
     "dev": "node --watch bin/workbench.js",
     "mcp": "node bin/workbench.js --mcp",
+    "agents": "node bin/agents.js",
     "test": "node --test"
   },
   "engines": {

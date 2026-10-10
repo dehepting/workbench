@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Workbench Agent Configuration",
+  "description": "Configuration for multiple autonomous agents with different roles and capabilities",
+  "type": "object",
+  "properties": {
+    "agents": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z0-9-]+$": {
+          "type": "object",
+          "properties": {
+            "description": {
+              "type": "string",
+              "description": "Human-readable description of what this agent does"
+            },
+            "model": {
+              "type": ["string", "null"],
+              "description": "Model to use (e.g., 'free:smart', 'groq/llama-3.3-70b', 'anthropic/claude-sonnet-4')",
+              "default": "free:smart"
+            },
+            "exec": {
+              "type": ["string", "null"],
+              "description": "Exec mode command template (e.g., 'claude -p {prompt}') or null for pooled mode",
+              "default": null
+            },
+            "filters": {
+              "type": "object",
+              "description": "Filter criteria for which tasks this agent picks up",
+              "properties": {
+                "column": {
+                  "type": "string",
+                  "enum": ["backlog", "todo", "doing", "review", "done", "failed"],
+                  "description": "Only pick tasks in this column"
+                },
+                "labels": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Only pick tasks with ANY of these labels"
+                },
+                "exclude_labels": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Skip tasks with ANY of these labels"
+                },
+                "priority_min": {
+                  "type": "integer",
+                  "description": "Only pick tasks with priority >= this value"
+                },
+                "priority_max": {
+                  "type": "integer",
+                  "description": "Only pick tasks with priority <= this value"
+                },
+                "project_id": {
+                  "type": "string",
+                  "description": "Only pick tasks from this project"
+                }
+              }
+            },
+            "system_prompt": {
+              "type": "string",
+              "description": "Custom system prompt for this agent's role",
+              "default": "You are an autonomous worker agent. Complete the task and report concisely what you did."
+            },
+            "max_retries": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "description": "Maximum retries for failed tasks",
+              "default": 3
+            },
+            "lease_minutes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120,
+              "description": "How long to hold task leases",
+              "default": 30
+            },
+            "poll_ms": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 60000,
+              "description": "Polling interval in milliseconds",
+              "default": 4000
+            },
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether this agent is active",
+              "default": true
+            }
+          },
+          "required": ["description"]
+        }
+      }
+    }
+  },
+  "required": ["agents"]
+}

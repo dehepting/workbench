@@ -246,8 +246,8 @@ export async function openPullRequest(project, task, work, output) {
   return pr;
 }
 
-export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd = undefined } = {}) {
-  const task = board.nextTask(db, agent, { minutes: leaseMinutes });
+export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd = undefined, filters = null, systemPrompt = null } = {}) {
+  const task = board.nextTask(db, agent, { minutes: leaseMinutes, filters });
   if (!task || task.empty) return null;
 
   // Hand the agent its predecessors' actual results, not bare task ids.
@@ -315,7 +315,9 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
         if (work) await git.removeWorktree(work.cloneDir, work.dir).catch(() => {});
       }
     } else {
-      const r = await complete(db, { prompt: buildPrompt(task, deps), agent, task_id: task.id });
+      const completeOpts = { prompt: buildPrompt(task, deps), agent, task_id: task.id };
+      if (systemPrompt) completeOpts.system = systemPrompt;
+      const r = await complete(db, completeOpts);
       output = `${r.text}\n\n(model: ${r.model} via ${r.provider} — ${r.tokens_in}in/${r.tokens_out}out tokens, est. $${r.cost})`;
     }
 
@@ -348,13 +350,15 @@ export async function startWorker(db, {
   leaseMinutes = 30,
   exec = process.env.WORKBENCH_WORKER_EXEC || null,
   cwd = process.env.WORKBENCH_WORKER_CWD || undefined,
+  filters = null,
+  systemPrompt = null,
 } = {}) {
   console.log(`worker "${agent}" started — exec: ${exec ? exec : 'pooled LLM (free:smart)'}${cwd ? ` (cwd: ${cwd})` : ''}`);
 
   while (true) {
     let worked = null;
     try {
-      worked = await runOnce(db, agent, { exec, leaseMinutes, cwd });
+      worked = await runOnce(db, agent, { exec, leaseMinutes, cwd, filters, systemPrompt });
     } catch (e) {
       // A failed pull must not escape — that would kill the loop for good.
       console.error(`[${agent}] pull failed: ${e.message}`);

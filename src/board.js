@@ -396,19 +396,74 @@ export function releaseTask(db, id, agent) {
 }
 
 // Atomically pull + claim the highest-priority unblocked task. Two agents can never get the same one.
-export function nextTask(db, agent, { project_id = null, minutes = 10 } = {}) {
+export function nextTask(db, agent, { project_id = null, minutes = 10, filters = null } = {}) {
   if (!agent) fail('bad_request', 'agent required');
   db.exec('BEGIN IMMEDIATE');
   try {
-    const rows = db.prepare(`SELECT id, project_id, deps FROM tasks
-      WHERE column_name IN ('backlog','todo')
-        AND (lease_holder IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?)
-        ${project_id ? 'AND project_id = ?' : ''}
+    // Build WHERE clauses based on filters
+    const where = [];
+    const params = [now()];
+
+    // Default: only backlog and todo
+    if (filters?.column) {
+      where.push('column_name = ?');
+      params.push(filters.column);
+    } else {
+      where.push('column_name IN (\'backlog\',\'todo\')');
+    }
+
+    // Lease availability
+    where.push('(lease_holder IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?)');
+
+    // Project filter
+    if (project_id) {
+      where.push('project_id = ?');
+      params.push(project_id);
+    } else if (filters?.project_id) {
+      where.push('project_id = ?');
+      params.push(filters.project_id);
+    }
+
+    // Priority filters
+    if (filters?.priority_min !== undefined) {
+      where.push('priority >= ?');
+      params.push(filters.priority_min);
+    }
+    if (filters?.priority_max !== undefined) {
+      where.push('priority <= ?');
+      params.push(filters.priority_max);
+    }
+
+    const rows = db.prepare(`SELECT id, project_id, deps, labels FROM tasks
+      WHERE ${where.join(' AND ')}
       ORDER BY priority DESC, created_at ASC`)
-      .all(...(project_id ? [now(), project_id] : [now()]));
+      .all(...params);
+
     for (const r of rows) {
+      // Check label filters in-memory (JSON extraction in WHERE is expensive)
+      const taskLabels = parseJson(r.labels, []);
+
+      // Must have at least ONE of the required labels
+      if (filters?.labels && filters.labels.length > 0) {
+        const hasMatchingLabel = filters.labels.some(filterLabel =>
+          taskLabels.includes(filterLabel)
+        );
+        if (!hasMatchingLabel) continue;
+      }
+
+      // Must NOT have ANY excluded labels
+      if (filters?.exclude_labels && filters.exclude_labels.length > 0) {
+        const hasExcludedLabel = filters.exclude_labels.some(excludeLabel =>
+          taskLabels.includes(excludeLabel)
+        );
+        if (hasExcludedLabel) continue;
+      }
+
+      // Check dependencies
       const deps = parseJson(r.deps);
       if (deps.some(d => taskStatus(db, d) !== 'done')) continue;
+
+      // Found a matching task - claim it
       const t = claimTask(db, r.id, agent, minutes);
       db.exec('COMMIT');
       return t;

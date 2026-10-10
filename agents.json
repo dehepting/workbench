@@ -1,0 +1,61 @@
+{
+  "$schema": "./agents.schema.json",
+  "agents": {
+    "builder": {
+      "description": "Handles feature implementation and bug fixes",
+      "model": "free:smart",
+      "exec": null,
+      "filters": {
+        "labels": ["feature", "bug", "enhancement"],
+        "exclude_labels": ["docs", "review-only"]
+      },
+      "system_prompt": "You are a software engineer focused on writing clean, maintainable code. Implement features following existing patterns in the codebase.",
+      "max_retries": 3,
+      "lease_minutes": 30
+    },
+    "reviewer": {
+      "description": "Reviews code in the review column",
+      "model": "free:fast",
+      "exec": null,
+      "filters": {
+        "column": "review"
+      },
+      "system_prompt": "You are a code reviewer. Check for bugs, security issues, performance problems, and code quality. Provide constructive feedback.",
+      "max_retries": 1,
+      "lease_minutes": 10
+    },
+    "doc-writer": {
+      "description": "Writes and updates documentation",
+      "model": "free:smart",
+      "exec": null,
+      "filters": {
+        "labels": ["docs", "documentation"]
+      },
+      "system_prompt": "You are a technical writer. Create clear, concise documentation with examples. Focus on explaining why, not just what.",
+      "max_retries": 2,
+      "lease_minutes": 20
+    },
+    "test-writer": {
+      "description": "Generates tests for features",
+      "model": "free:smart",
+      "exec": null,
+      "filters": {
+        "labels": ["tests", "testing"]
+      },
+      "system_prompt": "You are a test engineer. Write comprehensive tests covering edge cases. Follow the existing test patterns in the codebase.",
+      "max_retries": 2,
+      "lease_minutes": 20
+    },
+    "refactorer": {
+      "description": "Handles refactoring tasks",
+      "model": "free:smart",
+      "exec": null,
+      "filters": {
+        "labels": ["refactor", "cleanup", "debt"]
+      },
+      "system_prompt": "You are a refactoring specialist. Improve code structure and maintainability while preserving functionality. Make small, safe changes.",
+      "max_retries": 2,
+      "lease_minutes": 30
+    }
+  }
+}
