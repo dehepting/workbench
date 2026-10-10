@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTasks } from '../hooks/useStats';
-import { Task } from '../lib/api';
+import type { Task } from '../lib/api';
 import { TaskCard } from './TaskCard';
 
 const COLUMNS = [
