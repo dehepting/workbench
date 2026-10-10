@@ -76,7 +76,6 @@
   <button id="newProjectBtn" title="Create project">+ Project</button>
   <button id="newTaskBtn" class="primary">+ New task</button>
   <button id="githubBtn" title="GitHub repo this project mirrors">GitHub</button>
-  <button id="agentsBtn" title="Live agent activity">🤖 Agents</button>
   <button id="providersBtn" title="Inference provider status">⚡ Providers</button>
   <div class="chips" id="chips"></div>
 </header>
@@ -102,7 +101,6 @@
 <div class="overlay" id="taskOverlay"><div class="modal" id="taskModal"></div></div>
 <div class="overlay" id="formOverlay"><div class="modal" id="formModal"></div></div>
 <div class="overlay" id="providersOverlay"><div class="modal" id="providersModal"></div></div>
-<div class="overlay" id="agentsOverlay"><div class="modal" id="agentsModal"></div></div>
 <div class="overlay" id="githubOverlay"><div class="modal" id="githubModal"></div></div>
 
 <script>
@@ -526,99 +524,6 @@ async function openProviders() {
   $('#providersOverlay').classList.add('open');
 }
 
-// ---------- agents panel (live activity) ----------
-
-async function openAgents() {
-  $('#agentsModal').innerHTML = `
-    <h2>Agent Activity</h2>
-    <div class="sub">Live view of running agents. Connects via SSE for real-time updates.</div>
-    <div id="agentsList">Loading…</div>
-    <div class="actions"><button onclick="document.getElementById('agentsOverlay').classList.remove('open')">Close</button></div>`;
-  $('#agentsOverlay').classList.add('open');
-  await refreshAgents();
-  startAgentsSSE();
-}
-
-async function refreshAgents() {
-  try {
-    const agents = await api('/api/agents');
-    renderAgents(agents);
-  } catch (e) {
-    $('#agentsList').innerHTML = `<div class="comment system"><span class="who">Failed to load: ${esc(e.message)}</span></div>`;
-  }
-}
-
-function renderAgents(agents) {
-  if (!agents.length) {
-    $('#agentsList').innerHTML = '<div class="empty">No agents running</div>';
-    return;
-  }
-  const statusColor = {
-    starting: '#a371f7',
-    running: '#3fb950',
-    completed: '#4f9cf9',
-    failed: '#f85149',
-    killed: '#d29922',
-  };
-  $('#agentsList').innerHTML = agents.map(a => {
-    const task = state.tasks.find(t => t.id === a.task_id);
-    const taskTitle = task ? task.title : 'unknown';
-    const elapsed = a.started_at ? Date.now() - new Date(a.started_at).getTime() : 0;
-    const elapsedStr = elapsed < 60000 ? `${(elapsed/1000).toFixed(0)}s`
-      : elapsed < 3600000 ? `${(elapsed/60000).toFixed(1)}m` : `${(elapsed/3600000).toFixed(1)}h`;
-    return `
-      <div class="comment ${a.status === 'failed' ? 'system' : ''}" style="border-left: 3px solid ${statusColor[a.status] || '#8b949e'}">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <span class="who"><b>${esc(taskTitle)}</b> (${a.task_id.slice(0,12)})</span>
-          <span style="font-size:11px;color:${statusColor[a.status] || '#8b949e'};font-weight:600">${a.status.toUpperCase()}</span>
-        </div>
-        <div class="kv" style="font-size:11px;margin-bottom:6px">
-          <dt>Agent ID</dt><dd>${a.id.slice(0,12)}</dd>
-          <dt>PID</dt><dd>${a.pid || '—'}</dd>
-          <dt>Worktree</dt><dd>${a.worktree_dir ? esc(a.worktree_dir).slice(-60) : '—'}</dd>
-          <dt>Elapsed</dt><dd>${elapsedStr}</dd>
-          <dt>Last commit</dt><dd>${a.last_commit ? a.last_commit.slice(0,8) : '—'}</dd>
-          <dt>Last log</dt><dd>${a.last_log_line ? esc(a.last_log_line).slice(0,80) : '—'}</dd>
-        </div>
-        ${a.ended_at ? `<div class="deps">Ended: ${new Date(a.ended_at).toLocaleString()}</div>` : ''}
-      </div>`;
-  }).join('');
-}
-
-let agentsSSE = null;
-function startAgentsSSE() {
-  if (agentsSSE) agentsSSE.close();
-  agentsSSE = new EventSource('/events');
-  agentsSSE.addEventListener('agent.register', async (e) => {
-    const data = JSON.parse(e.data);
-    console.log('[agent.register]', data);
-    await refreshAgents();
-  });
-  agentsSSE.addEventListener('agent.update', async (e) => {
-    const data = JSON.parse(e.data);
-    console.log('[agent.update]', data);
-    await refreshAgents();
-  });
-  agentsSSE.addEventListener('agent.end', async (e) => {
-    const data = JSON.parse(e.data);
-    console.log('[agent.end]', data);
-    await refreshAgents();
-  });
-  agentsSSE.onerror = () => {
-    console.log('[agents SSE] connection lost, reconnecting in 5s');
-    setTimeout(startAgentsSSE, 5000);
-  };
-}
-
-function stopAgentsSSE() {
-  if (agentsSSE) { agentsSSE.close(); agentsSSE = null; }
-}
-
-// Listen for overlay close to stop SSE
-document.getElementById('agentsOverlay').addEventListener('click', (e) => {
-  if (e.target === document.getElementById('agentsOverlay')) stopAgentsSSE();
-});
-
 // ---------- github panel ----------
 //
 // A picker, not a prompt: the panel lists the repos the token can see, flags
@@ -735,7 +640,6 @@ async function renderGithub({ refresh = false } = {}) {
 // ---------- header wiring ----------
 
 $('#newTaskBtn').onclick = openForm;
-$('#agentsBtn').onclick = openAgents;
 $('#providersBtn').onclick = openProviders;
 $('#projectSelect').onchange = e => { state.project = e.target.value || null; refresh(); };
 $('#newProjectBtn').onclick = async () => {
