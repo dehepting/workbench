@@ -22,7 +22,7 @@
   .chips { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
   .chip { background: var(--panel); border: 1px solid var(--border); border-radius: 20px; padding: 3px 12px; font-size: 12px; color: var(--muted); }
   .chip b { color: var(--text); font-weight: 600; }
-  #board { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; padding: 14px; min-height: calc(100vh - 110px); }
+  #board { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; padding: 14px; min-height: calc(100vh - 150px); }
   .col { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
   .col-head { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); display: flex; justify-content: space-between; }
   .col-head .wip { color: var(--amber); } .col-head .count { color: var(--muted); }
@@ -58,6 +58,14 @@
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 12px; margin-bottom: 10px; }
   .kv dt { color: var(--muted); } .kv dd { word-break: break-all; }
   .err { color: var(--red); font-size: 12px; margin-top: 8px; min-height: 16px; }
+  /* tabs */
+  .tabs { display: flex; gap: 2px; padding: 0 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .tab { background: transparent; color: var(--muted); border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 10px 16px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+  .tab:hover { color: var(--text); background: var(--panel2); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+  #overview, #live, #debug { padding: 14px; }
 </style>
 </head>
 <body>
@@ -71,7 +79,24 @@
   <button id="providersBtn" title="Inference provider status">⚡ Providers</button>
   <div class="chips" id="chips"></div>
 </header>
-<main id="board"></main>
+<nav class="tabs">
+  <button class="tab active" data-tab="board">Board</button>
+  <button class="tab" data-tab="overview">Overview</button>
+  <button class="tab" data-tab="live">Live</button>
+  <button class="tab" data-tab="debug">Debug</button>
+</nav>
+<main>
+  <div id="board" class="tab-content active"></div>
+  <div id="overview" class="tab-content"></div>
+  <div id="live" class="tab-content"></div>
+  <div id="debug" class="tab-content">
+    <h2 style="font-size:16px;margin-bottom:12px">Debug</h2>
+    <div class="comment system">
+      <span class="who">🚧 Debug panel coming soon</span>
+      <span class="deps">This will show traces, logs, and token usage when OpenTelemetry is integrated.</span>
+    </div>
+  </div>
+</main>
 
 <div class="overlay" id="taskOverlay"><div class="modal" id="taskModal"></div></div>
 <div class="overlay" id="formOverlay"><div class="modal" id="formModal"></div></div>
@@ -87,7 +112,34 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const fmtMs = ms => ms == null ? '—' : ms < 60e3 ? (ms/1e3).toFixed(0)+'s' : ms < 36e5 ? (ms/6e4).toFixed(1)+'m' : (ms/36e5).toFixed(1)+'h';
 const agent = () => localStorage.getItem('wb_agent') || 'agent-1';
 
-const state = { projects: [], project: null, tasks: [], stats: null, ledger: null };
+const state = { projects: [], project: null, tasks: [], stats: null, ledger: null, activeTab: localStorage.getItem('wb_tab') || 'board' };
+
+// ---------- tab system ----------
+
+function switchTab(tabName) {
+  state.activeTab = tabName;
+  localStorage.setItem('wb_tab', tabName);
+
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+  const tabBtn = document.querySelector(`.tab[data-tab="${tabName}"]`);
+  const tabContent = document.getElementById(tabName);
+
+  if (tabBtn) tabBtn.classList.add('active');
+  if (tabContent) tabContent.classList.add('active');
+
+  // Render tab-specific content
+  if (tabName === 'overview') renderOverview();
+  if (tabName === 'live') renderLive();
+}
+
+function initTabs() {
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+  });
+  switchTab(state.activeTab);
+}
 
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
@@ -103,15 +155,150 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
+function renderOverview() {
+  const s = state.stats, l = state.ledger;
+  const byColumn = COLUMNS.reduce((acc, col) => {
+    acc[col] = state.tasks.filter(t => t.column_name === col).length;
+    return acc;
+  }, {});
+
+  const completed1h = state.tasks.filter(t => t.completed_at && (Date.now() - new Date(t.completed_at).getTime() < 3600000)).length;
+
+  const byLabel = {};
+  state.tasks.forEach(t => {
+    (t.labels || []).forEach(label => {
+      byLabel[label] = (byLabel[label] || 0) + 1;
+    });
+  });
+
+  $('#overview').innerHTML = `
+    <h2 style="font-size:16px;margin-bottom:14px">Overview</h2>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:20px">
+      <div class="comment">
+        <span class="who">Total Tasks</span>
+        <span class="deps" style="font-size:24px;font-weight:700;color:var(--text)">${state.tasks.length}</span>
+      </div>
+      <div class="comment">
+        <span class="who">WIP Limit</span>
+        <span class="deps" style="font-size:24px;font-weight:700;color:var(--amber)">${s?.wip ?? 0}</span>
+      </div>
+      <div class="comment">
+        <span class="who">Done Today</span>
+        <span class="deps" style="font-size:24px;font-weight:700;color:var(--green)">${s?.doneToday ?? 0}</span>
+      </div>
+      <div class="comment">
+        <span class="who">Failed</span>
+        <span class="deps" style="font-size:24px;font-weight:700;color:var(--red)">${s?.failed ?? 0}</span>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px">
+      <div class="comment">
+        <span class="who">Tasks by Column</span>
+        <div style="margin-top:8px">
+          ${COLUMNS.map(col => `
+            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">
+              <span>${LABELS[col]}</span>
+              <span style="font-weight:700">${byColumn[col]}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <div class="comment">
+        <span class="who">Performance Metrics</span>
+        <div class="kv" style="margin-top:8px">
+          <dt>Throughput</dt><dd>${s?.throughputPerDay ?? 0} tasks/day</dd>
+          <dt>Cycle Time</dt><dd>${fmtMs(s?.medianCycleMs)}</dd>
+          <dt>Completed (1h)</dt><dd>${completed1h}</dd>
+          <dt>Total Spend</dt><dd>$${l?.total?.cost ?? 0}</dd>
+        </div>
+      </div>
+    </div>
+
+    ${Object.keys(byLabel).length > 0 ? `
+      <div class="comment">
+        <span class="who">Tasks by Label</span>
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+          ${Object.entries(byLabel).sort((a,b) => b[1] - a[1]).map(([label, count]) => `
+            <span class="tag">${esc(label)} (${count})</span>
+          `).join('')}
+        </div>
+      </div>
+    ` : ''}
+  `;
+}
+
+function renderLive() {
+  $('#live').innerHTML = `
+    <h2 style="font-size:16px;margin-bottom:14px">Live Agents</h2>
+    <div id="liveAgentsList">Loading…</div>
+  `;
+  refreshLiveAgents();
+}
+
+async function refreshLiveAgents() {
+  try {
+    const agents = await api('/api/agents');
+    const el = $('#liveAgentsList');
+    if (!el) return;
+
+    if (!agents.length) {
+      el.innerHTML = '<div class="comment system"><span class="who">No agents running</span><span class="deps">Start agents with <code>npm run agents</code></span></div>';
+      return;
+    }
+
+    const statusColor = {
+      starting: '#a371f7',
+      running: '#3fb950',
+      completed: '#4f9cf9',
+      failed: '#f85149',
+      killed: '#d29922',
+    };
+
+    el.innerHTML = agents.map(a => {
+      const task = state.tasks.find(t => t.id === a.task_id);
+      const taskTitle = task ? task.title : 'Unknown task';
+      const elapsed = a.started_at ? Date.now() - new Date(a.started_at).getTime() : 0;
+      const elapsedStr = fmtMs(elapsed);
+
+      return `
+        <div class="comment ${a.status === 'failed' ? 'system' : ''}" style="border-left:3px solid ${statusColor[a.status] || '#8b949e'}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span class="who"><b>${esc(taskTitle)}</b></span>
+            <span style="font-size:11px;color:${statusColor[a.status] || '#8b949e'};font-weight:600">${a.status.toUpperCase()}</span>
+          </div>
+          <div class="kv" style="font-size:11px">
+            <dt>Task ID</dt><dd>${a.task_id}</dd>
+            <dt>Agent ID</dt><dd>${a.id.slice(0,12)}</dd>
+            <dt>Elapsed</dt><dd>${elapsedStr}</dd>
+            ${a.last_commit ? `<dt>Last Commit</dt><dd>${a.last_commit.slice(0,8)}</dd>` : ''}
+            ${a.last_log_line ? `<dt>Last Log</dt><dd>${esc(a.last_log_line).slice(0,80)}</dd>` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (e) {
+    const el = $('#liveAgentsList');
+    if (el) el.innerHTML = `<div class="comment system"><span class="who">Error: ${esc(e.message)}</span></div>`;
+  }
+}
+
 async function boot() {
   state.projects = await api('/api/projects');
   renderProjectSelect();
   await refresh();
+  initTabs();
   const es = new EventSource('/events');
   for (const ev of ['task.create','task.move','task.claim','task.release','task.retry','task.update','task.delete','comment.add','run.record','project.create','wip.update']) {
     es.addEventListener(ev, () => refresh());
   }
+  for (const ev of ['agent.register','agent.update','agent.end']) {
+    es.addEventListener(ev, () => { if (state.activeTab === 'live') refreshLiveAgents(); });
+  }
   setInterval(refresh, 30000);
+  setInterval(() => { if (state.activeTab === 'live') refreshLiveAgents(); }, 10000);
 }
 
 async function refresh() {
@@ -120,7 +307,10 @@ async function refresh() {
     [state.tasks, state.stats, state.ledger, state.providers] = await Promise.all([
       api('/api/tasks' + qs), api('/api/stats'), api('/api/ledger'), api('/api/providers'),
     ]);
-    renderChips(); renderBoard();
+    renderChips();
+    renderBoard();
+    if (state.activeTab === 'overview') renderOverview();
+    if (state.activeTab === 'live') refreshLiveAgents();
   } catch (e) { console.error(e); }
 }
 

@@ -56,6 +56,17 @@
       "system_prompt": "You are a refactoring specialist. Improve code structure and maintainability while preserving functionality. Make small, safe changes.",
       "max_retries": 2,
       "lease_minutes": 30
+    },
+    "analyst": {
+      "description": "Handles data analysis and research tasks",
+      "model": "free:smart",
+      "exec": null,
+      "filters": {
+        "labels": ["analysis", "research", "data"]
+      },
+      "system_prompt": "You are a data analyst. Analyze data carefully, verify calculations, and present findings clearly. Be explicit about assumptions and limitations.",
+      "max_retries": 2,
+      "lease_minutes": 30
     }
   }
 }
