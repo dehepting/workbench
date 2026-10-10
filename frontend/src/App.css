@@ -361,16 +361,64 @@ button.primary {
 .board-container {
   width: 100%;
   height: calc(100vh - 120px);
-  overflow-x: auto;
-  padding: 14px 14px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
   margin: 0;
+}
+
+.board-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.board-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.board-controls label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.project-select {
+  min-width: 250px;
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.board-stats {
+  display: flex;
+  gap: 12px;
+}
+
+.board-stat {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 10px;
+  background: var(--panel2);
+  border-radius: 12px;
 }
 
 .board-columns {
   display: flex;
   gap: 14px;
   min-width: min-content;
-  height: 100%;
+  flex: 1;
+  overflow-x: auto;
+  padding: 14px;
 }
 
 .board-column {

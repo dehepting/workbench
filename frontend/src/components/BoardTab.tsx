@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useTasks } from '../hooks/useStats';
+import { useProjects } from '../hooks/useProjects';
 import type { Task } from '../lib/api';
 import { TaskCard } from './TaskCard';
 
@@ -13,7 +14,9 @@ const COLUMNS = [
 ];
 
 export function BoardTab() {
-  const { data: tasks, isLoading } = useTasks();
+  const [selectedProjectId, setSelectedProjectId] = useState<string>('');
+  const { data: projects } = useProjects();
+  const { data: tasks, isLoading } = useTasks(selectedProjectId || undefined);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
   if (isLoading) {
@@ -28,6 +31,31 @@ export function BoardTab() {
 
   return (
     <div className="board-container">
+      <div className="board-header">
+        <div className="board-controls">
+          <label htmlFor="project-select">Project:</label>
+          <select
+            id="project-select"
+            value={selectedProjectId}
+            onChange={(e) => setSelectedProjectId(e.target.value)}
+            className="project-select"
+          >
+            <option value="">All Projects</option>
+            {projects?.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+                {project.repo ? ` (${project.repo})` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="board-stats">
+          <span className="board-stat">
+            {tasks?.length || 0} tasks
+          </span>
+        </div>
+      </div>
+
       <div className="board-columns">
         {COLUMNS.map((column) => (
           <div key={column.id} className="board-column">

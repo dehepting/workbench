@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useProviders } from '../hooks/useStats';
+import { useProjects } from '../hooks/useProjects';
 import { api } from '../lib/api';
 
 export function ConnectionsTab() {
   const { data: providersData, refetch } = useProviders();
+  const { data: projects } = useProjects();
   const [testing, setTesting] = useState<string | null>(null);
 
   const handleTest = async (provider: string) => {
@@ -22,6 +24,10 @@ export function ConnectionsTab() {
   const unconfigured = providersData.providers.filter(p => !p.configured);
   const healthy = configured.filter(p => p.healthy).length;
 
+  // Check GitHub connection
+  const githubConnected = projects?.some(p => p.repo) || false;
+  const githubRepos = projects?.filter(p => p.repo).map(p => p.repo) || [];
+
   return (
     <div className="tab-content connections">
       <div className="connections-header">
@@ -30,6 +36,64 @@ export function ConnectionsTab() {
           <span className="stat-badge healthy">{healthy} healthy</span>
           <span className="stat-badge total">{configured.length} configured</span>
           <span className="stat-badge available">{providersData.providers.length} total</span>
+        </div>
+      </div>
+
+      {/* GitHub Integration */}
+      <div className="connections-section">
+        <h3>Integrations</h3>
+        <div className="connections-grid">
+          <div className={`connection-card ${githubConnected ? 'configured' : 'unconfigured'}`}>
+            <div className="connection-card-header">
+              <div className="connection-info">
+                <div className="connection-title">
+                  <span className="connection-name">GitHub</span>
+                  {githubConnected && (
+                    <span className="connection-status healthy">
+                      ● Connected
+                    </span>
+                  )}
+                </div>
+                <div className="connection-meta">
+                  <span className="model-count">
+                    {githubRepos.length} {githubRepos.length === 1 ? 'repository' : 'repositories'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {githubConnected ? (
+              <>
+                <div className="connection-stats-row">
+                  <div className="stat-item">
+                    <span className="stat-label">Status</span>
+                    <span className="stat-value" style={{ fontSize: '14px' }}>
+                      {process.env.GITHUB_TOKEN ? 'Token configured' : 'Using webhooks'}
+                    </span>
+                  </div>
+                  <div className="stat-item">
+                    <span className="stat-label">Sync</span>
+                    <span className="stat-value" style={{ fontSize: '14px' }}>Active</span>
+                  </div>
+                </div>
+
+                {githubRepos.length > 0 && (
+                  <div className="models-list">
+                    {githubRepos.map((repo) => (
+                      <div key={repo} className="model-item">
+                        <code>{repo}</code>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="unconfigured-notice">
+                <p>No repositories connected</p>
+                <small>Configure GitHub repo in project settings</small>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
