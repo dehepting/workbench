@@ -32,3 +32,11 @@ export function useProviders() {
     refetchInterval: 10000,
   });
 }
+
+export function useAgents() {
+  return useQuery({
+    queryKey: ['agents'],
+    queryFn: () => api.getAgents(),
+    refetchInterval: 3000, // Refresh every 3s for live updates
+  });
+}

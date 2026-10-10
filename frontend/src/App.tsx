@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
 import { OverviewTab } from './components/OverviewTab';
+import { LiveTab } from './components/LiveTab';
 import './App.css';
 
 // Create a client
@@ -77,10 +78,6 @@ function App() {
 // Placeholder tab components
 function BoardTab() {
   return <div className="tab-content">Board - Coming soon</div>;
-}
-
-function LiveTab() {
-  return <div className="tab-content">Live - Coming soon</div>;
 }
 
 function DebugTab() {
