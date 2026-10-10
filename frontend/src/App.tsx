@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { OverviewTab } from './components/OverviewTab';
 import { LiveTab } from './components/LiveTab';
 import { BoardTab } from './components/BoardTab';
+import { ConnectionsTab } from './components/ConnectionsTab';
 import { NewTaskModal } from './components/NewTaskModal';
 import './App.css';
 
@@ -17,7 +18,7 @@ const queryClient = new QueryClient({
   },
 });
 
-type Tab = 'board' | 'overview' | 'live' | 'debug';
+type Tab = 'board' | 'overview' | 'live' | 'connections' | 'debug';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>(
@@ -62,6 +63,12 @@ function App() {
             Live
           </button>
           <button
+            className={`tab ${activeTab === 'connections' ? 'active' : ''}`}
+            onClick={() => handleTabChange('connections')}
+          >
+            Connections
+          </button>
+          <button
             className={`tab ${activeTab === 'debug' ? 'active' : ''}`}
             onClick={() => handleTabChange('debug')}
           >
@@ -73,6 +80,7 @@ function App() {
           {activeTab === 'board' && <BoardTab />}
           {activeTab === 'overview' && <OverviewTab />}
           {activeTab === 'live' && <LiveTab />}
+          {activeTab === 'connections' && <ConnectionsTab />}
           {activeTab === 'debug' && <DebugTab />}
         </main>
 
