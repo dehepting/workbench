@@ -2,14 +2,24 @@ import crypto from 'node:crypto';
 import { emit } from './bus.js';
 import { PRICES, DEFAULT_PRICE } from './providers.js';
 import { getToken, commentIssue, closeIssue, createIssue, reopenIssue, issueState } from './github.js';
+import {
+  validateTitle,
+  validateDescription,
+  validateComment,
+  validatePriority,
+  validateMaxRetries,
+  validateLabels,
+  validateDeps,
+  ValidationError as ValidErr
+} from './validation.js';
+import { DEFAULT_MAX_RETRIES, COMMENT_LIST_DEFAULT_LIMIT } from './constants.js';
+import { parseJsonSafe, NotFoundError, BoardError as BrdError } from './errors.js';
 
 export const COLUMNS = ['backlog', 'todo', 'doing', 'review', 'done', 'failed'];
 
 const now = () => new Date().toISOString();
 const uid = (prefix) => `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
-const parseJson = (s, fallback = []) => {
-  try { return JSON.parse(s ?? '[]'); } catch { return fallback; }
-};
+const parseJson = (s, fallback = []) => parseJsonSafe(s ?? '[]', fallback);
 
 export class BoardError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -30,7 +40,7 @@ function hydrate(t) {
 
 export function getTask(db, id) {
   const t = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
-  if (!t) fail('not_found', `Task ${id} not found`);
+  if (!t) throw new NotFoundError('Task', id);
   return hydrate(t);
 }
 
@@ -122,7 +132,7 @@ function withRepo(p) {
 
 export function getProject(db, id) {
   const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
-  if (!p) fail('not_found', `Project ${id} not found`);
+  if (!p) throw new NotFoundError('Project', id);
   const meta = parseJson(p.meta, {});
   return {
     ...p,
@@ -149,14 +159,22 @@ export function setWipLimit(db, projectId, column, value) {
 export function createTask(db, input, actor = 'system') {
   const {
     project_id, title, description = '', assignee = null, priority = 0,
-    labels = [], deps = [], next_task_title = '', requires_review = false, max_retries = 3,
+    labels = [], deps = [], next_task_title = '', requires_review = false, max_retries = DEFAULT_MAX_RETRIES,
     meta = {},
   } = input;
   if (!project_id || !db.prepare('SELECT id FROM projects WHERE id = ?').get(project_id)) {
     fail('not_found', `Project ${project_id} not found`);
   }
-  if (!title?.trim()) fail('bad_request', 'Task title required');
-  const cleanDeps = [...new Set(deps)];
+
+  // Validate inputs
+  const validTitle = validateTitle(title);
+  const validDescription = validateDescription(description);
+  const validPriority = validatePriority(priority);
+  const validMaxRetries = validateMaxRetries(max_retries);
+  const validLabels = validateLabels(labels);
+  const validDeps = validateDeps(deps);
+
+  const cleanDeps = [...new Set(validDeps || [])];
   for (const d of cleanDeps) {
     if (!taskStatus(db, d)) fail('bad_request', `Unknown dependency: ${d}`);
   }
@@ -165,12 +183,12 @@ export function createTask(db, input, actor = 'system') {
     (id, project_id, title, description, column_name, priority, assignee, labels, deps,
      next_task_title, requires_review, max_retries, meta, created_at, updated_at)
     VALUES (?,?,?,?,'backlog',?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, project_id, title.trim(), description, priority | 0, assignee,
-      JSON.stringify([...new Set(labels)]), JSON.stringify(cleanDeps),
-      next_task_title || '', requires_review ? 1 : 0, max_retries | 0,
+    .run(id, project_id, validTitle, validDescription || '', validPriority ?? 0, assignee,
+      JSON.stringify([...new Set(validLabels || [])]), JSON.stringify(cleanDeps),
+      next_task_title || '', requires_review ? 1 : 0, validMaxRetries ?? DEFAULT_MAX_RETRIES,
       JSON.stringify(meta), now(), now());
-  audit(db, actor, 'task.create', id, project_id, title);
-  emit('task.create', { id, project_id, title, actor });
+  audit(db, actor, 'task.create', id, project_id, validTitle);
+  emit('task.create', { id, project_id, title: validTitle, actor });
   return getTask(db, id);
 }
 
@@ -189,11 +207,22 @@ export function updateTask(db, id, patch, actor = 'system') {
   const t = getTask(db, id);
   const allowed = ['title', 'description', 'assignee', 'priority', 'labels', 'meta', 'next_task_title', 'requires_review', 'max_retries'];
   const set = {};
-  for (const k of allowed) if (k in patch) set[k] = patch[k];
+
+  // Validate inputs
+  for (const k of allowed) {
+    if (!(k in patch)) continue;
+
+    if (k === 'title') set[k] = validateTitle(patch[k]);
+    else if (k === 'description') set[k] = validateDescription(patch[k]);
+    else if (k === 'priority') set[k] = validatePriority(patch[k]);
+    else if (k === 'max_retries') set[k] = validateMaxRetries(patch[k]);
+    else if (k === 'labels') set[k] = validateLabels(patch[k]);
+    else set[k] = patch[k];
+  }
 
   let newDeps = null;
   if ('deps' in patch) {
-    newDeps = [...new Set(patch.deps)];
+    newDeps = [...new Set(validateDeps(patch.deps) || [])];
     for (const d of newDeps) {
       if (!taskStatus(db, d)) fail('bad_request', `Unknown dependency: ${d}`);
     }
@@ -438,7 +467,11 @@ export function importIssues(db, projectId, repo, issues, { actor = 'github' } =
 
     // An issue that names a task id in its body is already work we track —
     // adopt it rather than creating a second card for the same work.
-    const claimed = issue.body.match(/\bt_[0-9a-f]{12}\b/)?.[0];
+    // Only match the explicit anchor pattern "Workbench task \`t_xxx\`" that
+    // pushTasksToGithub writes. A bare mention in a deps/related section
+    // must not hijack the issue (fixes false link of dashboard issue #19
+    // to ranking task via a "Depends on: t_4faa63cb7ba6" line).
+    const claimed = issue.body.match(/Workbench task\s+`(t_[0-9a-f]{12})`/)?.[1];
     if (claimed && taskExists(db, claimed)) {
       linkGithub(db, claimed, repo, issue.number, issue.url);
       result.linked.push({ number: issue.number, task_id: claimed });
@@ -466,22 +499,24 @@ export function importIssues(db, projectId, repo, issues, { actor = 'github' } =
 
 // The task already anchored to an issue, in whatever project owns it.
 function anchoredTask(db, repo, number) {
-  const row = db.prepare('SELECT id, project_id, meta FROM tasks').all()
-    .find((r) => {
-      const gh = parseJson(r.meta, {}).github;
-      return gh?.repo === repo && gh?.number === number;
-    });
+  const row = db.prepare(`
+    SELECT id, project_id, meta FROM tasks
+    WHERE json_extract(meta, '$.github.repo') = ?
+      AND json_extract(meta, '$.github.number') = ?
+    LIMIT 1
+  `).get(repo, number);
   return row || null;
 }
 
 // Issue numbers already anchored to a task in this repo.
 export function tasksByRepo(db, repo) {
-  const numbers = [];
-  for (const r of db.prepare('SELECT meta FROM tasks').all()) {
-    const meta = parseJson(r.meta, {});
-    if (meta.github?.repo === repo && Number.isInteger(meta.github?.number)) numbers.push(meta.github.number);
-  }
-  return numbers;
+  const rows = db.prepare(`
+    SELECT json_extract(meta, '$.github.number') as number
+    FROM tasks
+    WHERE json_extract(meta, '$.github.repo') = ?
+      AND json_extract(meta, '$.github.number') IS NOT NULL
+  `).all(repo);
+  return rows.map(r => r.number).filter(n => Number.isInteger(n));
 }
 
 // Reconcile board state against GitHub: a closed issue completes its task, and
@@ -725,17 +760,17 @@ export async function reopenMirrorIssue(db, taskId, from, actor = 'system') {
 
 // ---------- comments ----------
 
-export function listComments(db, id) {
-  return db.prepare('SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC').all(id);
+export function listComments(db, id, { limit = COMMENT_LIST_DEFAULT_LIMIT } = {}) {
+  return db.prepare('SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC LIMIT ?').all(id, limit);
 }
 
 export function addTaskComment(db, id, author, body) {
   getTask(db, id);
-  if (!body?.trim()) fail('bad_request', 'Comment body required');
+  const validBody = validateComment(body);
   db.prepare('INSERT INTO comments (id, task_id, author, body, system, created_at) VALUES (?,?,?,?,0,?)')
-    .run(uid('c'), id, author, body, now());
-  audit(db, author, 'comment.add', id, null, body);
-  emit('comment.add', { id, author, body });
+    .run(uid('c'), id, author, validBody, now());
+  audit(db, author, 'comment.add', id, null, validBody);
+  emit('comment.add', { id, author, body: validBody });
   return listComments(db, id);
 }
 
@@ -809,4 +844,49 @@ export function flowStats(db) {
 
 export function auditTrail(db, limit = 100) {
   return db.prepare('SELECT * FROM audit ORDER BY rowid DESC LIMIT ?').all(limit);
+}
+
+// ---------- agent tracking ----------
+
+export function registerAgent(db, taskId, pid, worktreeDir) {
+  const id = uid('agt');
+  const nowStr = now();
+  db.prepare('INSERT INTO agents (id, task_id, pid, worktree_dir, status, started_at, updated_at) VALUES (?,?,?,?,?,?,?)')
+    .run(id, taskId, pid, worktreeDir, 'running', nowStr, nowStr);
+  emit('agent.register', { id, taskId, pid, worktreeDir });
+  return { id, taskId, pid, worktreeDir, status: 'running', startedAt: nowStr };
+}
+
+export function updateAgentStatus(db, taskId, updates) {
+  const nowStr = now();
+  const set = [];
+  const params = [];
+  if (updates.status) { set.push('status = ?'); params.push(updates.status); }
+  if (updates.lastCommit) { set.push('last_commit = ?'); params.push(updates.lastCommit); }
+  if (updates.lastLogLine) { set.push('last_log_line = ?'); params.push(updates.lastLogLine); }
+  if (updates.pid) { set.push('pid = ?'); params.push(updates.pid); }
+  if (set.length === 0) return null;
+  set.push('updated_at = ?'); params.push(nowStr);
+  params.push(taskId);
+  db.prepare(`UPDATE agents SET ${set.join(', ')} WHERE task_id = ?`).run(...params);
+  emit('agent.update', { taskId, ...updates });
+  return { taskId, ...updates, updatedAt: nowStr };
+}
+
+export function endAgent(db, taskId, status = 'completed') {
+  const nowStr = now();
+  db.prepare('UPDATE agents SET status = ?, ended_at = ?, updated_at = ? WHERE task_id = ?')
+    .run(status, nowStr, nowStr, taskId);
+  emit('agent.end', { taskId, status });
+  return { taskId, status, endedAt: nowStr };
+}
+
+export function listAgents(db, { status = null } = {}) {
+  const where = status ? 'WHERE status = ?' : '';
+  const params = status ? [status] : [];
+  return db.prepare(`SELECT * FROM agents ${where} ORDER BY started_at DESC`).all(...params);
+}
+
+export function getAgent(db, taskId) {
+  return db.prepare('SELECT * FROM agents WHERE task_id = ?').get(taskId);
 }

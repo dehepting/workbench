@@ -7,6 +7,10 @@ import * as providers from './providers.js';
 import * as github from './github.js';
 import * as sync from './sync.js';
 import { onEvent } from './bus.js';
+import { sseHandler, broadcast as broadcastSSE } from './sse.js';
+import { REQUEST_BODY_MAX_BYTES, SSE_CLIENT_CLEANUP_INTERVAL_MS } from './constants.js';
+import { fireAndForget } from './errors.js';
+import { ValidationError } from './validation.js';
 
 export function startServer(db) {
   const PORT = +(process.env.PORT || 3000);
@@ -16,16 +20,36 @@ export function startServer(db) {
   const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || null;
 
   const sseClients = new Set();
+
+  // Clean up dead SSE clients periodically
+  function cleanupDeadClients() {
+    for (const res of sseClients) {
+      if (res.destroyed || res.writableEnded) {
+        sseClients.delete(res);
+      }
+    }
+  }
+  const cleanupInterval = setInterval(cleanupDeadClients, SSE_CLIENT_CLEANUP_INTERVAL_MS);
+  cleanupInterval.unref();
+
   onEvent((event, data) => {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const res of sseClients) {
-      try { res.write(payload); } catch { /* dropped client */ }
+      try {
+        if (!res.destroyed && !res.writableEnded) {
+          res.write(payload);
+        } else {
+          sseClients.delete(res);
+        }
+      } catch (e) {
+        sseClients.delete(res);
+      }
     }
     if (WEBHOOK_URL) {
       const body = JSON.stringify({ ts: new Date().toISOString(), event, data });
       const headers = { 'Content-Type': 'application/json' };
       if (WEBHOOK_SECRET) headers['X-Workbench-Signature'] = 'sha256=' + createHmac('sha256', WEBHOOK_SECRET).update(body).digest('hex');
-      fetch(WEBHOOK_URL, { method: 'POST', headers, body }).catch(() => {});
+      fireAndForget(fetch(WEBHOOK_URL, { method: 'POST', headers, body }), { context: 'webhook_delivery', event });
     }
   });
 
@@ -46,8 +70,20 @@ export function startServer(db) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       res.write('retry: 2000\n\n');
       sseClients.add(res);
-      req.on('close', () => sseClients.delete(res));
+
+      // Cleanup on all termination paths
+      const cleanup = () => sseClients.delete(res);
+      req.on('close', cleanup);
+      req.on('error', cleanup);
+      res.on('error', cleanup);
+      res.on('finish', cleanup);
       return;
+    }
+
+    // Task-specific SSE: GET /api/tasks/:id/stream
+    const taskStreamMatch = path.match(/^\/api\/tasks\/([\w-]+)\/stream$/);
+    if (taskStreamMatch && req.method === 'GET') {
+      return sseHandler(req, res, taskStreamMatch[1]);
     }
 
     if (path === '/' || path === '/index.html') {
@@ -161,8 +197,21 @@ export function startServer(db) {
       if (m('GET') && path === '/api/stats') return send(res, 200, board.flowStats(db));
       if (m('GET') && path === '/api/audit') return send(res, 200, board.auditTrail(db, +(url.searchParams.get('limit') || 100)));
 
+      // --- agent activity ---
+      if (m('GET') && path === '/api/agents') return send(res, 200, board.listAgents(db, { status: url.searchParams.get('status') || null }));
+      const agentMatch = path.match(/^\/api\/agents\/([\w-]+)$/);
+      if (agentMatch && m('GET')) return send(res, 200, board.getAgent(db, agentMatch[1]));
+      if (agentMatch && m('DELETE')) return send(res, 200, board.endAgent(db, agentMatch[1], 'killed'));
+
       return send(res, 404, { error: 'not found' });
     } catch (e) {
+      if (e instanceof ValidationError || e.name === 'ValidationError') {
+        return send(res, 400, { error: e.message, field: e.field });
+      }
+      // Map error types to HTTP status codes
+      if (e.name === 'NotFoundError') {
+        return send(res, 404, { error: e.message });
+      }
       const code = e.code === 'not_found' ? 404 : e.code === 'bad_request' ? 400 : 409;
       return send(res, code, { error: e.message });
     }
@@ -189,7 +238,7 @@ export function startServer(db) {
 function readBody(req) {
   return new Promise((resolve) => {
     let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 1e6) req.destroy(); });
+    req.on('data', (c) => { data += c; if (data.length > REQUEST_BODY_MAX_BYTES) req.destroy(); });
     req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); } });
   });
 }
@@ -197,7 +246,7 @@ function readBody(req) {
 function readRaw(req) {
   return new Promise((resolve) => {
     let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 1e6) req.destroy(); });
+    req.on('data', (c) => { data += c; if (data.length > REQUEST_BODY_MAX_BYTES) req.destroy(); });
     req.on('end', () => resolve(data));
   });
 }

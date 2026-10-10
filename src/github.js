@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withRetry } from './retry.js';
 
 const execFileP = promisify(execFile);
 
@@ -71,43 +72,67 @@ export async function githubStatus() {
 }
 
 export async function createIssue(token, repo, { title, body, labels = [] }) {
-  const res = await fetch(`https://api.github.com/repos/${repo}/issues`, {
-    method: 'POST',
-    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, body, labels }),
-  });
-  if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.json(); // { number, html_url, ... }
+  return withRetry(async () => {
+    const res = await fetch(`https://api.github.com/repos/${repo}/issues`, {
+      method: 'POST',
+      headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, body, labels }),
+    });
+    if (!res.ok) {
+      const err = new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      err.response = res;
+      throw err;
+    }
+    return res.json(); // { number, html_url, ... }
+  }, { context: { operation: 'createIssue', repo } });
 }
 
 export async function commentIssue(token, repo, number, body) {
-  const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}/comments`, {
-    method: 'POST',
-    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ body }),
-  });
-  if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.json();
+  return withRetry(async () => {
+    const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}/comments`, {
+      method: 'POST',
+      headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    });
+    if (!res.ok) {
+      const err = new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      err.response = res;
+      throw err;
+    }
+    return res.json();
+  }, { context: { operation: 'commentIssue', repo, number } });
 }
 
 export async function closeIssue(token, repo, number) {
-  const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
-    method: 'PATCH',
-    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state: 'closed' }),
-  });
-  if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.json();
+  return withRetry(async () => {
+    const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
+      method: 'PATCH',
+      headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'closed' }),
+    });
+    if (!res.ok) {
+      const err = new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      err.response = res;
+      throw err;
+    }
+    return res.json();
+  }, { context: { operation: 'closeIssue', repo, number } });
 }
 
 export async function reopenIssue(token, repo, number) {
-  const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
-    method: 'PATCH',
-    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state: 'open' }),
-  });
-  if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.json();
+  return withRetry(async () => {
+    const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
+      method: 'PATCH',
+      headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'open' }),
+    });
+    if (!res.ok) {
+      const err = new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      err.response = res;
+      throw err;
+    }
+    return res.json();
+  }, { context: { operation: 'reopenIssue', repo, number } });
 }
 
 // 'open' | 'closed' | null. Returns null rather than throwing when the issue
@@ -129,13 +154,19 @@ export async function issueState(token, repo, number) {
 // was posted".
 
 export async function createPullRequest(token, repo, { title, body, head, base = 'main' }) {
-  const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
-    method: 'POST',
-    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, body, head, base }),
-  });
-  if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.json(); // { number, html_url, mergeable, state, ... }
+  return withRetry(async () => {
+    const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+      method: 'POST',
+      headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, body, head, base }),
+    });
+    if (!res.ok) {
+      const err = new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      err.response = res;
+      throw err;
+    }
+    return res.json(); // { number, html_url, mergeable, state, ... }
+  }, { context: { operation: 'createPullRequest', repo, head, base } });
 }
 
 // Merge state is a three-way answer, not a boolean. Callers need to tell
@@ -193,9 +224,15 @@ async function paged(token, url) {
   const out = [];
   for (let page = 1; page <= 10; page++) {
     const sep = url.includes('?') ? '&' : '?';
-    const res = await fetch(`${url}${sep}per_page=100&page=${page}`, { headers: authHeaders(token) });
-    if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const batch = await res.json();
+    const batch = await withRetry(async () => {
+      const res = await fetch(`${url}${sep}per_page=100&page=${page}`, { headers: authHeaders(token) });
+      if (!res.ok) {
+        const err = new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        err.response = res;
+        throw err;
+      }
+      return res.json();
+    }, { context: { operation: 'paged', url, page } });
     out.push(...batch);
     if (batch.length < 100) break;
   }

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -6,17 +7,21 @@ import * as board from './board.js';
 import * as git from './git.js';
 import * as github from './github.js';
 import { complete } from './model.js';
+import { broadcast } from './sse.js';
+import {
+  DEP_OUTPUT_LIMIT_CHARS,
+  LEASE_RENEWAL_INTERVAL_MS,
+  WORKER_POLL_DEFAULT_MS
+} from './constants.js';
+import { parseJsonSafe } from './errors.js';
 
 const execFileP = promisify(execFile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// How much of a dependency's recorded output to feed the next task.
-const DEP_OUTPUT_LIMIT = 4000;
-
 // A chained follow-up used to see only "Depends on: t_abc123" — a bare id that
 // tells the agent nothing, so it came back with clarifying questions and the
 // worker still marked it done. Pull the dependency's actual result instead.
-export function depContext(db, ids, { limit = DEP_OUTPUT_LIMIT } = {}) {
+export function depContext(db, ids, { limit = DEP_OUTPUT_LIMIT_CHARS } = {}) {
   return ids.map((id) => {
     let t;
     try { t = board.getTask(db, id); } catch { return `### Dependency ${id}\n(the task no longer exists)`; }
@@ -105,14 +110,43 @@ export function shellCommand(template, prompt) {
   return `(${substitutePrompt(template, prompt)}) < /dev/null`;
 }
 
-export async function runExec(template, prompt, { cwd = process.env.WORKBENCH_WORKER_CWD || undefined } = {}) {
+export async function runExec(template, prompt, { cwd = process.env.WORKBENCH_WORKER_CWD || undefined, onSpawn = null } = {}) {
   const shellCmd = shellCommand(template, prompt);
-  const { stdout, stderr } = await execFileP('/bin/sh', ['-lc', shellCmd], {
-    maxBuffer: 10 * 1024 * 1024,
-    timeout: 30 * 60 * 1000, // 30 min hard cap
-    cwd, // exec agents complained "the working directory is empty" otherwise
+  return new Promise((resolve, reject) => {
+    const child = spawn('/bin/sh', ['-lc', shellCmd], {
+      maxBuffer: DEP_OUTPUT_LIMIT_CHARS,
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    if (onSpawn) onSpawn(child.pid);
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout?.on('data', (d) => { stdout += d.toString(); });
+    child.stderr?.on('data', (d) => { stderr += d.toString(); });
+
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error('Agent execution timeout (30 min)'));
+    }, LEASE_RENEWAL_INTERVAL_MS);
+
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      const output = (stdout + (stderr ? `\n[stderr]\n${stderr}` : '')).trim() || '(no output)';
+      if (code !== 0) {
+        reject(new Error(`Command failed with exit code ${code}: ${output}`));
+      } else {
+        resolve(output);
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
   });
-  return (stdout + (stderr ? `\n[stderr]\n${stderr}` : '')).trim() || '(no output)';
 }
 
 // One pull → work → advance cycle. Exported so the failure path is testable:
@@ -127,9 +161,7 @@ export function normalizeAgentOutput(raw) {
   const text = String(raw ?? '').trim();
   if (!text.startsWith('{')) return text;
 
-  const events = text.split('\n').map((l) => {
-    try { return JSON.parse(l); } catch { return null; }
-  }).filter(Boolean);
+  const events = text.split('\n').map((l) => parseJsonSafe(l, null)).filter(Boolean);
   // Only treat it as an event stream if every line parsed — a lone JSON blob
   // (an error body, say) is not one.
   if (events.length !== text.split('\n').filter((l) => l.trim()).length) return text;
@@ -224,34 +256,48 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
   // Keep the lease alive while working, so a long task isn't re-claimed mid-flight.
   const renew = setInterval(() => {
     try { board.renewLease(db, task.id, agent, leaseMinutes); } catch { /* task may have moved on */ }
-  }, 60_000);
+  }, LEASE_RENEWAL_INTERVAL_MS / 30); // Renew every 1 minute (30 min lease / 30)
 
   try {
     board.addTaskComment(db, task.id, agent, `picked up by ${agent}`);
     board.moveTask(db, task.id, 'doing', { actor: agent });
+    broadcast(task.id, { type: 'state', payload: { column: 'doing', leaseHolder: agent } });
 
     let output;
+    let pid = null;
     let pr = null;
     if (exec) {
       const project = board.getProject(db, task.project_id);
       const work = project.repo ? await prepareWorktree(project, task) : null;
 
+      // Register agent tracking (even without worktree, we track the agent)
+      if (work) {
+        board.registerAgent(db, task.id, 0, work.dir);
+      } else {
+        // Track agent even without worktree - use temp dir as worktree_dir
+        board.registerAgent(db, task.id, 0, cwd || process.cwd());
+      }
+
       try {
-        output = normalizeAgentOutput(
-          await runExec(exec, buildPrompt(task, deps, { mode: 'exec' }), { cwd: work?.dir ?? cwd }),
-        );
+        const execResult = await runExec(exec, buildPrompt(task, deps, { mode: 'exec' }), {
+          cwd: work?.dir ?? cwd,
+          onSpawn: (p) => { pid = p; board.updateAgentStatus(db, task.id, { pid: p, status: 'running' }); }
+        });
+        output = normalizeAgentOutput(execResult);
+
         // Only raise a PR for repo work. A task with no repo bound, or one the
         // agent ran outside a worktree, has nothing to diff.
         if (work) pr = await openPullRequest(project, task, work, output);
 
         // Remedy 1 + 5: preserve agent receipt in the worktree so visibility survives cleanup.
-        try {
-          const snapshot = await writeLastRunSnapshot(work, task, output);
-          // Also record in task meta so the receipt survives worktree cleanup.
-          const meta = task.meta || {};
-          meta.lastRun = snapshot;
-          board.updateTask(db, task.id, { meta });
-        } catch { /* non-fatal: snapshot is a convenience, not a requirement */ }
+        if (work) {
+          try {
+            const snapshot = await writeLastRunSnapshot(work, task, output);
+            const meta = task.meta || {};
+            meta.lastRun = snapshot;
+            board.updateTask(db, task.id, { meta });
+          } catch { /* non-fatal: snapshot is a convenience, not a requirement */ }
+        }
       } finally {
         // Remedy 1 + 5: preserve agent receipt in the worktree so visibility survives cleanup.
         // Runs in finally so it survives PR errors (e.g. no commits between base and branch).
@@ -274,7 +320,10 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
     }
 
     board.addTaskComment(db, task.id, agent, `completed:\n${output}`);
-    board.moveTask(db, task.id, task.requires_review ? 'review' : 'done', { actor: agent });
+        const finalCol = task.requires_review ? 'review' : 'done';
+    board.moveTask(db, task.id, finalCol, { actor: agent });
+    broadcast(task.id, { type: 'state', payload: { column: finalCol, pr: pr?.number || null } });
+    if (exec) board.endAgent(db, task.id, 'completed');
     console.log(`[${agent}] done: ${task.id} "${task.title}"${pr ? ` (PR #${pr.number})` : ''}`);
   } catch (e) {
     // addTaskComment is synchronous: this line was `.catch(() => {})`, which threw
@@ -283,7 +332,9 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
     try {
       // moving to failed auto-retries (up to max_retries) or lands in failed
       board.moveTask(db, task.id, 'failed', { actor: agent });
+      broadcast(task.id, { type: 'state', payload: { column: 'failed', error: e.message } });
     } catch { /* already terminal */ }
+    if (exec) board.endAgent(db, task.id, 'failed');
     console.error(`[${agent}] failed: ${task.id} "${task.title}" — ${e.message}`);
   } finally {
     clearInterval(renew);
@@ -293,7 +344,7 @@ export async function runOnce(db, agent, { exec = null, leaseMinutes = 30, cwd =
 
 export async function startWorker(db, {
   agent = 'worker-1',
-  pollMs = +(process.env.WORKBENCH_POLL_MS || 4000),
+  pollMs = +(process.env.WORKBENCH_POLL_MS || WORKER_POLL_DEFAULT_MS),
   leaseMinutes = 30,
   exec = process.env.WORKBENCH_WORKER_EXEC || null,
   cwd = process.env.WORKBENCH_WORKER_CWD || undefined,

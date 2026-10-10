@@ -75,6 +75,32 @@ export function openStore(dir) {
       limit_value INTEGER NOT NULL,
       PRIMARY KEY (project_id, column_name)
     );
+
+    CREATE TABLE IF NOT EXISTS agents (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      pid INTEGER,
+      worktree_dir TEXT,
+      status TEXT NOT NULL DEFAULT 'starting',
+      last_commit TEXT,
+      last_log_line TEXT,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      ended_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id);
+    CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+
+    CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
+    CREATE INDEX IF NOT EXISTS idx_tasks_column_name ON tasks(column_name);
+    CREATE INDEX IF NOT EXISTS idx_tasks_project_column ON tasks(project_id, column_name);
+    CREATE INDEX IF NOT EXISTS idx_tasks_lease_expires ON tasks(lease_expires_at) WHERE lease_expires_at IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_tasks_queue_priority ON tasks(column_name, priority DESC, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_comments_task_id ON comments(task_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_task_id ON audit(task_id, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_project_id ON audit(project_id, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id);
   `);
 
   // Migrate DBs created before the meta column existed.

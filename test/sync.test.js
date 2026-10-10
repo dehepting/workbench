@@ -112,7 +112,7 @@ test('re-importing the same issues creates nothing new', () => {
 
 test('an issue naming a task id is adopted, not duplicated', () => {
   const existing = board.createTask(db, { project_id: projectId(), title: 'Already on the board' }, 'test');
-  issues = [makeIssue(5, { body: `Tracking as ${existing.id}` })];
+  issues = [makeIssue(5, { body: `Workbench task \`${existing.id}\` — track it` })];
 
   const r = board.importIssues(db, projectId(), 'dehepting/workbench', issues);
 
@@ -197,8 +197,9 @@ test('a failed push stops and retries later instead of skipping forever', async 
   globalThis.fetch = async (url, opts = {}) => {
     calls.push({ url: String(url), method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null });
     if (String(url).includes('/comments') && opts.method === 'POST') {
-      // Exactly one failure: the second comment fails, the retry succeeds.
-      if (calls.filter((c) => c.method === 'POST').length === 2) return { ok: false, status: 500, text: async () => 'boom' };
+      // Use 400 (non-retryable) instead of 500 (retryable) to test failure tracking.
+      // With retry logic, 500 errors are retried automatically and would succeed.
+      if (calls.filter((c) => c.method === 'POST').length === 2) return { ok: false, status: 400, text: async () => 'boom' };
       return ok({});
     }
     return ok([]);

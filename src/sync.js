@@ -7,8 +7,9 @@
 // every write is anchored on meta.github, so overlap is harmless.
 import * as board from './board.js';
 import * as github from './github.js';
+import { SYNC_INTERVAL_DEFAULT_MS } from './constants.js';
 
-const DEFAULT_INTERVAL_MS = +(process.env.WORKBENCH_SYNC_INTERVAL_MS || 60_000);
+const DEFAULT_INTERVAL_MS = +(process.env.WORKBENCH_SYNC_INTERVAL_MS || SYNC_INTERVAL_DEFAULT_MS);
 
 // One full pass over every project bound to a repo. Exported so the dashboard
 // can trigger it on demand, and so tests can drive it directly.
@@ -55,9 +56,17 @@ export async function syncProject(db, projectId, { actor = 'github' } = {}) {
   const reconciled = board.syncIssuesFromGithub(db, projectId, repo, [...open, ...closed], { actor });
 
   // Push: task comments land back on their issue.
+  // Fix N+1 query: fetch id and meta together instead of calling getTask in loop
   const pushedComments = [];
-  for (const row of db.prepare('SELECT id FROM tasks WHERE project_id = ?').all(projectId)) {
-    const gh = board.getTask(db, row.id).meta?.github;
+  const tasks = db.prepare('SELECT id, meta FROM tasks WHERE project_id = ?').all(projectId);
+  for (const row of tasks) {
+    let meta;
+    try {
+      meta = JSON.parse(row.meta || '{}');
+    } catch {
+      meta = {};
+    }
+    const gh = meta?.github;
     if (!gh?.repo || !gh.number) continue;
     try {
       const r = await board.pushCommentsToIssue(db, row.id);
