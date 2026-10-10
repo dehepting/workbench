@@ -63,8 +63,9 @@
   .tab { background: transparent; color: var(--muted); border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 10px 16px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
   .tab:hover { color: var(--text); background: var(--panel2); }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-  .tab-content { display: none; }
-  .tab-content.active { display: block; }
+  .tab-content { display: none !important; }
+  .tab-content.active { display: block !important; }
+  #board.active { display: grid !important; }
   #overview, #live, #debug { padding: 14px; }
 </style>
 </head>
@@ -117,6 +118,7 @@ const state = { projects: [], project: null, tasks: [], stats: null, ledger: nul
 // ---------- tab system ----------
 
 function switchTab(tabName) {
+  console.log('[Tabs] Switching to:', tabName);
   state.activeTab = tabName;
   localStorage.setItem('wb_tab', tabName);
 
@@ -126,17 +128,36 @@ function switchTab(tabName) {
   const tabBtn = document.querySelector(`.tab[data-tab="${tabName}"]`);
   const tabContent = document.getElementById(tabName);
 
+  console.log('[Tabs] Tab button found:', !!tabBtn);
+  console.log('[Tabs] Tab content found:', !!tabContent);
+
   if (tabBtn) tabBtn.classList.add('active');
-  if (tabContent) tabContent.classList.add('active');
+  if (tabContent) {
+    tabContent.classList.add('active');
+    console.log('[Tabs] Content should be visible now');
+  }
 
   // Render tab-specific content
-  if (tabName === 'overview') renderOverview();
-  if (tabName === 'live') renderLive();
+  if (tabName === 'overview') {
+    console.log('[Tabs] Rendering overview...');
+    renderOverview();
+  }
+  if (tabName === 'live') {
+    console.log('[Tabs] Rendering live...');
+    renderLive();
+  }
 }
 
 function initTabs() {
-  document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+  console.log('[Tabs] Initializing tabs...');
+  const tabs = document.querySelectorAll('.tab');
+  console.log('[Tabs] Found', tabs.length, 'tabs');
+  tabs.forEach(tab => {
+    console.log('[Tabs] Adding listener to:', tab.dataset.tab);
+    tab.addEventListener('click', () => {
+      console.log('[Tabs] Tab clicked:', tab.dataset.tab);
+      switchTab(tab.dataset.tab);
+    });
   });
   switchTab(state.activeTab);
 }
